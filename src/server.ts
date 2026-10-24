@@ -2,40 +2,62 @@ import Fastify from 'fastify';
 import formbody from '@fastify/formbody';
 import { env } from './config/env.js';
 import { SanityTenantProvider } from './core/providers/sanity-tenant.provider.js';
-import { TwilioProvider } from './telephony/twilio.provider.js';
-import { TelnyxProvider } from './telephony/telnyx.provider.js';
-import { ReceptionistEngine } from './agent/receptionist-engine.js';
+import { GeminiReceptionistAgent } from './agent/gemini-receptionist.agent.js';
 import { LeadDispatcher } from './integrations/lead-dispatcher.js';
-import { registerRoutes } from './routes.js';
+import { registerTelnyxIngestRoute } from './routes/telnyx-ingest.route.js';
+import { registerSmsWorkerRoute } from './routes/sms-worker.route.js';
+import { registerTelnyxVoiceRoutes } from './routes/telnyx-voice.route.js';
 
-async function bootstrap() {
+export function buildServer() {
   const app = Fastify({
-    logger: true,
+    logger: {
+      transport: {
+        target: 'pino-pretty',
+        options: {
+          colorize: true,
+          translateTime: 'HH:MM:ss Z',
+          ignore: 'pid,hostname',
+        },
+      },
+    },
   });
 
-  // Fastify plugin to parse application/x-www-form-urlencoded from Twilio/Telnyx webhooks
-  await app.register(formbody);
+  // Fastify plugin to parse application/x-www-form-urlencoded payloads from voice webhooks
+  app.register(formbody);
 
-  // Initialize Providers
-  const tenantProvider = new SanityTenantProvider();
-  const telephonyProvider = env.TELEPHONY_PROVIDER === 'telnyx'
-    ? new TelnyxProvider()
-    : new TwilioProvider();
+  // Health check endpoint
+  app.get('/health', async () => ({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+  }));
 
-  const agent = new ReceptionistEngine();
+  // Initialize Core Services
+  const tenantProvider = new SanityTenantProvider({
+    projectId: env.SANITY_PROJECT_ID,
+    dataset: env.SANITY_DATASET,
+    apiVersion: env.SANITY_API_VERSION,
+  });
+  const agent = new GeminiReceptionistAgent();
   const leadDispatcher = new LeadDispatcher();
 
-  // Register Webhook & Health Routes
-  registerRoutes(app, tenantProvider, telephonyProvider, agent, leadDispatcher);
+  // Register Routes
+  registerTelnyxIngestRoute(app);
+  registerSmsWorkerRoute(app, tenantProvider, agent, leadDispatcher);
+  registerTelnyxVoiceRoutes(app, tenantProvider);
 
-  // Start Server
-  try {
-    const address = await app.listen({ port: env.PORT, host: env.HOST });
-    console.log(`[AI Receptionist] Microservice running on ${address}`);
-  } catch (err) {
-    app.log.error(err);
-    process.exit(1);
-  }
+  return app;
 }
 
-bootstrap();
+// Start server when run directly as main entrypoint
+const isDirectRun = process.argv[1] && (process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js'));
+
+if (isDirectRun && process.env.NODE_ENV !== 'test') {
+  const app = buildServer();
+  app.listen({ port: env.PORT, host: env.HOST }, (err, address) => {
+    if (err) {
+      console.error('Error starting server:', err);
+      process.exit(1);
+    }
+    console.log(`\nAI Receptionist Ingest Service listening at: ${address}\n`);
+  });
+}

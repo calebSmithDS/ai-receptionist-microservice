@@ -4,6 +4,10 @@ export interface TenantService {
   startingPrice?: string | number;
 }
 
+/**
+ * The standardized data structure representing any business tenant,
+ * regardless of whether they were stored in Sanity, Postgres, or an external API.
+ */
 export interface TenantContext {
   tenantId: string;
   businessName: string;
@@ -13,13 +17,16 @@ export interface TenantContext {
   businessHours?: string;
   aiCustomInstructions?: string;
   services: TenantService[];
-  customDomain?: string; // Optional domain for parent WaaS webhook dispatch
+  customDomain?: string; // Optional domain for Astro WaaS webhook dispatch
 }
 
+/**
+ * Contract that every Tenant Provider must satisfy.
+ */
 export interface ITenantProvider {
   /**
-   * Resolves tenant metadata using the inbound/assigned virtual phone number.
-   * Standardizes across E.164 formats (e.g. +614..., 04...).
+   * Resolves tenant metadata using the virtual phone number dialed/texted.
    */
   getTenantByPhoneNumber(phoneNumber: string): Promise<TenantContext | null>;
 }
+

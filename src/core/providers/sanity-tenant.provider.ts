@@ -1,37 +1,65 @@
-import { createClient, SanityClient } from '@sanity/client';
-import { env } from '../../config/env.js';
+import { createClient, type SanityClient } from '@sanity/client';
 import { ITenantProvider, TenantContext } from '../types/tenant.js';
+
+export interface SanityProviderConfig {
+  projectId: string;
+  dataset: string;
+  apiVersion?: string;
+  token?: string;
+  useCdn?: boolean;
+}
 
 export class SanityTenantProvider implements ITenantProvider {
   private client: SanityClient;
-  private cache: Map<string, { data: TenantContext; expiresAt: number }> = new Map();
-  private cacheTTLMs = 5 * 60 * 1000; // 5 minute cache
+  // In-memory cache: phone -> { data, expiresAt }
+  private cache = new Map<string, { data: TenantContext; expiresAt: number }>();
+  private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-  constructor() {
+  constructor(config: SanityProviderConfig) {
     this.client = createClient({
-      projectId: env.SANITY_PROJECT_ID,
-      dataset: env.SANITY_DATASET,
-      apiVersion: env.SANITY_API_VERSION,
-      token: env.SANITY_API_TOKEN,
-      useCdn: true,
+      projectId: config.projectId,
+      dataset: config.dataset,
+      apiVersion: config.apiVersion || '2024-01-01',
+      token: config.token,
+      useCdn: config.useCdn ?? true,
     });
   }
 
-  private normalizeNumber(phone: string): string {
+  /**
+   * Normalizes a phone number to digits and leading plus.
+   * e.g. "0412 345 678" -> "0412345678", "+61 412-345-678" -> "+61412345678"
+   */
+  private normalizePhone(phone: string): string {
     return phone.replace(/[^\d+]/g, '').trim();
   }
 
-  async getTenantByPhoneNumber(phoneNumber: string): Promise<TenantContext | null> {
-    const normalized = this.normalizeNumber(phoneNumber);
+  /**
+   * Generates both domestic (04...) and international (+61...) variations
+   * of an Australian phone number to ensure a hit in Sanity.
+   */
+  private getPhoneVariations(phone: string): { primary: string; alternate: string } {
+    const clean = this.normalizePhone(phone);
+    if (clean.startsWith('+61')) {
+      return { primary: clean, alternate: '0' + clean.slice(3) };
+    }
+    if (clean.startsWith('0')) {
+      return { primary: clean, alternate: '+61' + clean.slice(1) };
+    }
+    return { primary: clean, alternate: clean };
+  }
 
-    const cached = this.cache.get(normalized);
+  async getTenantByPhoneNumber(phoneNumber: string): Promise<TenantContext | null> {
+    const { primary, alternate } = this.getPhoneVariations(phoneNumber);
+
+    // 1. Check in-memory cache
+    const cached = this.cache.get(primary) || this.cache.get(alternate);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.data;
     }
 
-    // Query Sanity tenant document matching twilioForwardingNumber
-    // Also dereference services or fetch associated service docs
-    const query = `*[_type == "tenant" && (twilioForwardingNumber == $phone || twilioForwardingNumber == $altPhone)][0]{
+    // 2. GROQ Query against Sanity
+    // Matches twilioForwardingNumber against primary or alternate format
+    const query = `*[_type == "tenant" && (twilioForwardingNumber == $primary || twilioForwardingNumber == $alternate)][0]{
       tenantId,
       businessName,
       publicPhone,
@@ -47,30 +75,24 @@ export class SanityTenantProvider implements ITenantProvider {
       }
     }`;
 
-    // Test both international and domestic prefixes
-    const altPhone = normalized.startsWith('+61')
-      ? '0' + normalized.slice(3)
-      : normalized.startsWith('0')
-      ? '+61' + normalized.slice(1)
-      : normalized;
-
     try {
-      const result = await this.client.fetch<TenantContext | null>(query, {
-        phone: normalized,
-        altPhone,
+      const tenant = await this.client.fetch<TenantContext | null>(query, {
+        primary,
+        alternate,
       });
 
-      if (result) {
-        this.cache.set(normalized, {
-          data: result,
-          expiresAt: Date.now() + this.cacheTTLMs,
-        });
+      if (tenant) {
+        // Cache under both variations
+        const expiresAt = Date.now() + this.CACHE_TTL_MS;
+        this.cache.set(primary, { data: tenant, expiresAt });
+        this.cache.set(alternate, { data: tenant, expiresAt });
       }
 
-      return result;
+      return tenant;
     } catch (error) {
       console.error('[SanityTenantProvider] Error querying tenant by phone:', error);
       return null;
     }
   }
 }
+

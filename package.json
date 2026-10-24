@@ -1,34 +1,27 @@
 {
   "name": "ai-receptionist-microservice",
   "version": "0.1.0",
-  "description": "Multi-tenant AI receptionist & missed call text-back microservice for local trade businesses",
-  "main": "dist/server.js",
+  "description": "Multi-tenant AI SMS Receptionist for boutique WaaS",
   "type": "module",
+  "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts"
   },
   "dependencies": {
-    "@fastify/formbody": "^9.0.1",
-    "@sanity/client": "^8.9.0",
-    "@types/node": "^26.6.5",
-    "dotenv": "^18.0.9",
-    "fastify": "^5.12.7",
-    "openai": "^7.43.0",
-    "tsx": "^4.23.15",
-    "twilio": "^6.2.0",
-    "typescript": "^7.0.2",
-    "zod": "^4.6.7"
+    "@fastify/formbody": "^8.0.2",
+    "@google/genai": "^2.31.0",
+    "@sanity/client": "^8.11.0",
+    "@upstash/qstash": "^2.7.20",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "zod": "^3.24.2"
   },
-  "keywords": [
-    "ai-receptionist",
-    "sms-agent",
-    "waas",
-    "twilio",
-    "telnyx",
-    "sanity"
-  ],
-  "author": "",
-  "license": "ISC"
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "pino-pretty": "^13.2.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
 }
