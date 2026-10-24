@@ -31,8 +31,18 @@ export function buildServer() {
     timestamp: new Date().toISOString(),
   }));
 
-  // Live Telemetry & Metrics endpoint
+  // Live Telemetry & Metrics endpoint (Global Snapshot)
   app.get('/metrics', async () => telemetry.getSnapshot());
+
+  // Per-Tenant Telemetry endpoint
+  app.get('/metrics/tenant/:tenantId', async (req, reply) => {
+    const { tenantId } = req.params as { tenantId: string };
+    const metrics = telemetry.getTenantMetrics(tenantId);
+    if (!metrics) {
+      return reply.status(404).send({ error: 'Tenant not found or has no activity yet' });
+    }
+    return { tenantId, ...metrics };
+  });
 
   // Initialize Core Services
   const tenantProvider = new SanityTenantProvider({

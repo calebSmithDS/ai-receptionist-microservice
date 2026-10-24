@@ -27,6 +27,8 @@ export function registerSmsWorkerRoute(
       return reply.status(200).send({ status: 'ignored', reason: 'Tenant not found' });
     }
 
+    telemetry.recordSmsReceived(tenant.tenantId);
+
     // 2. Run Gemini Receptionist Agent with latency measurement
     const geminiStart = performance.now();
     const { replyText, completedLead } = await agent.processMessage(tenant, event.fromPhone, event.body);
@@ -36,7 +38,7 @@ export function registerSmsWorkerRoute(
       { replyText, completedLead: !!completedLead, geminiDurationMs: `${geminiDurationMs}ms` },
       'Generated AI response'
     );
-    telemetry.recordSmsReplySent();
+    telemetry.recordSmsReplySent(tenant.tenantId);
 
     // 3. Send Outbound SMS Reply to the Customer via Telnyx REST API
     if (env.TELNYX_API_KEY) {
@@ -72,7 +74,7 @@ export function registerSmsWorkerRoute(
 
     // 4. If lead completed: Alert the Tradie directly via SMS
     if (completedLead) {
-      telemetry.recordLeadCaptured(completedLead.urgency);
+      telemetry.recordLeadCaptured(tenant.tenantId, completedLead.urgency);
       req.log.info(
         { lead: completedLead, tenantId: tenant.tenantId },
         '🎯 Qualified lead captured by AI'

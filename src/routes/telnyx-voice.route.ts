@@ -35,9 +35,6 @@ export function registerTelnyxVoiceRoutes(
       const dialedNumber = req.body?.To || req.body?.data?.payload?.to || '';
       const callerNumber = req.body?.From || req.body?.data?.payload?.from || '';
 
-      telemetry.recordCallReceived();
-      req.log.info({ dialedNumber, callerNumber }, 'Inbound voice call received');
-
       // 1. Resolve Tenant from Sanity
       const tenant = await tenantProvider.getTenantByPhoneNumber(dialedNumber);
       if (!tenant) {
@@ -45,6 +42,9 @@ export function registerTelnyxVoiceRoutes(
         // TeXML Reject
         return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Reject /></Response>');
       }
+
+      telemetry.recordCallReceived(tenant.tenantId);
+      req.log.info({ dialedNumber, callerNumber }, 'Inbound voice call received');
 
       req.log.info(
         { businessName: tenant.businessName, forwardTo: tenant.publicPhone },
@@ -88,14 +88,14 @@ export function registerTelnyxVoiceRoutes(
         return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response />');
       }
 
-      // If status is 'no-answer', 'busy', 'failed', or 'canceled', it was a MISSED CALL!
-      telemetry.recordCallMissed();
-      req.log.warn({ status, callerNumber }, 'Missed call detected! Triggering instant text-back');
-
       const tenant = await tenantProvider.getTenantByPhoneNumber(dialedNumber);
       if (!tenant || !callerNumber) {
         return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response />');
       }
+
+      // If status is 'no-answer', 'busy', 'failed', or 'canceled', it was a MISSED CALL!
+      telemetry.recordCallMissed(tenant.tenantId);
+      req.log.warn({ status, callerNumber, tenantId: tenant.tenantId }, 'Missed call detected! Triggering instant text-back');
 
       const textBackMessage = `Hi, thanks for calling ${tenant.businessName}! Sorry we missed your call, we're currently on a job. How can we help you today? Feel free to reply here.`;
       const tradieAlertMessage = `⚠️ Missed call from ${callerNumber}. Instant text-back has been sent. AI Receptionist will qualify them when they reply.`;
