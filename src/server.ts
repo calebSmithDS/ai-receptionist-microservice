@@ -9,17 +9,21 @@ import { registerTelnyxVoiceRoutes } from './routes/telnyx-voice.route.js';
 import { telemetry } from './telemetry/metrics.js';
 
 export function buildServer() {
+  const isDev = process.env.NODE_ENV !== 'production';
+
   const app = Fastify({
-    logger: {
-      transport: {
-        target: 'pino-pretty',
-        options: {
-          colorize: true,
-          translateTime: 'HH:MM:ss Z',
-          ignore: 'pid,hostname',
-        },
-      },
-    },
+    logger: isDev
+      ? {
+          transport: {
+            target: 'pino-pretty',
+            options: {
+              colorize: true,
+              translateTime: 'HH:MM:ss Z',
+              ignore: 'pid,hostname',
+            },
+          },
+        }
+      : true, // In production, use standard high-performance JSON logging
   });
 
   // Fastify plugin to parse application/x-www-form-urlencoded payloads from voice webhooks
