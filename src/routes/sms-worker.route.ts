@@ -2,14 +2,13 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { InboundSmsEventSchema } from '../contracts/inbound-sms.contract.js';
 import { ITenantProvider } from '../core/types/tenant.js';
 import { GeminiReceptionistAgent } from '../agent/gemini-receptionist.agent.js';
-import { LeadDispatcher } from '../integrations/lead-dispatcher.js';
+import { telemetry } from '../telemetry/metrics.js';
 import { env } from '../config/env.js';
 
 export function registerSmsWorkerRoute(
   app: FastifyInstance,
   tenantProvider: ITenantProvider,
-  agent: GeminiReceptionistAgent,
-  leadDispatcher: LeadDispatcher
+  agent: GeminiReceptionistAgent
 ) {
   app.post('/api/workers/process-sms', async (req: FastifyRequest, reply: FastifyReply) => {
     const parseResult = InboundSmsEventSchema.safeParse(req.body);
@@ -28,9 +27,16 @@ export function registerSmsWorkerRoute(
       return reply.status(200).send({ status: 'ignored', reason: 'Tenant not found' });
     }
 
-    // 2. Run Gemini Receptionist Agent
+    // 2. Run Gemini Receptionist Agent with latency measurement
+    const geminiStart = performance.now();
     const { replyText, completedLead } = await agent.processMessage(tenant, event.fromPhone, event.body);
-    req.log.info({ replyText, completedLead: !!completedLead }, 'Generated AI response');
+    const geminiDurationMs = (performance.now() - geminiStart).toFixed(2);
+
+    req.log.info(
+      { replyText, completedLead: !!completedLead, geminiDurationMs: `${geminiDurationMs}ms` },
+      'Generated AI response'
+    );
+    telemetry.recordSmsReplySent();
 
     // 3. Send Outbound SMS Reply to the Customer via Telnyx REST API
     if (env.TELNYX_API_KEY) {
@@ -64,18 +70,14 @@ export function registerSmsWorkerRoute(
       );
     }
 
-    // 4. If lead completed: Dispatch to WaaS Astro website & Alert the Tradie
+    // 4. If lead completed: Alert the Tradie directly via SMS
     if (completedLead) {
+      telemetry.recordLeadCaptured(completedLead.urgency);
       req.log.info(
         { lead: completedLead, tenantId: tenant.tenantId },
         '🎯 Qualified lead captured by AI'
       );
 
-      // A. Dispatch to Astro SSR website endpoint (/api/submit-lead)
-      const session = agent.getSession(tenant.tenantId, event.fromPhone);
-      await leadDispatcher.dispatchToWaaS(tenant, event.fromPhone, completedLead, session.turns);
-
-      // B. Send instant SMS summary to the tradie's mobile
       const urgencyIcon = completedLead.urgency === 'EMERGENCY' ? '🚨 EMERGENCY LEAD' : '🔔 NEW LEAD';
       const tradieNotification = `${urgencyIcon}: ${completedLead.customerName} (${completedLead.suburb})\nIssue: ${completedLead.jobDescription}\nPhone: ${event.fromPhone}`;
 

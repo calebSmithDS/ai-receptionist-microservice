@@ -3,10 +3,10 @@ import formbody from '@fastify/formbody';
 import { env } from './config/env.js';
 import { SanityTenantProvider } from './core/providers/sanity-tenant.provider.js';
 import { GeminiReceptionistAgent } from './agent/gemini-receptionist.agent.js';
-import { LeadDispatcher } from './integrations/lead-dispatcher.js';
 import { registerTelnyxIngestRoute } from './routes/telnyx-ingest.route.js';
 import { registerSmsWorkerRoute } from './routes/sms-worker.route.js';
 import { registerTelnyxVoiceRoutes } from './routes/telnyx-voice.route.js';
+import { telemetry } from './telemetry/metrics.js';
 
 export function buildServer() {
   const app = Fastify({
@@ -31,6 +31,9 @@ export function buildServer() {
     timestamp: new Date().toISOString(),
   }));
 
+  // Live Telemetry & Metrics endpoint
+  app.get('/metrics', async () => telemetry.getSnapshot());
+
   // Initialize Core Services
   const tenantProvider = new SanityTenantProvider({
     projectId: env.SANITY_PROJECT_ID,
@@ -38,11 +41,10 @@ export function buildServer() {
     apiVersion: env.SANITY_API_VERSION,
   });
   const agent = new GeminiReceptionistAgent();
-  const leadDispatcher = new LeadDispatcher();
 
   // Register Routes
   registerTelnyxIngestRoute(app);
-  registerSmsWorkerRoute(app, tenantProvider, agent, leadDispatcher);
+  registerSmsWorkerRoute(app, tenantProvider, agent);
   registerTelnyxVoiceRoutes(app, tenantProvider);
 
   return app;

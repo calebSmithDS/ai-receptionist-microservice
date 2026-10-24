@@ -156,7 +156,7 @@ CRITICAL RULES & HALLUCINATION SAFEGUARDS:
         config: {
           systemInstruction: this.buildSystemInstruction(tenant),
           temperature: 0.1, // Low temperature for high factual accuracy
-          maxOutputTokens: 150, // Keep SMS short
+          maxOutputTokens: 800, // Sufficient budget for tool calls and SMS replies
           tools: [{ functionDeclarations: [this.getLeadCaptureTool()] }],
         },
       });

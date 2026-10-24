@@ -2,7 +2,6 @@ import { buildServer } from '../server.js';
 import { InboundSmsEvent } from '../contracts/inbound-sms.contract.js';
 import { ITenantProvider, TenantContext } from '../core/types/tenant.js';
 import { GeminiReceptionistAgent } from '../agent/gemini-receptionist.agent.js';
-import { LeadDispatcher } from '../integrations/lead-dispatcher.js';
 import { registerSmsWorkerRoute } from '../routes/sms-worker.route.js';
 import Fastify from 'fastify';
 
@@ -32,9 +31,8 @@ async function test() {
   const app = Fastify();
   const mockTenantProvider = new MockTenantProvider();
   const agent = new GeminiReceptionistAgent();
-  const leadDispatcher = new LeadDispatcher();
 
-  registerSmsWorkerRoute(app, mockTenantProvider, agent, leadDispatcher);
+  registerSmsWorkerRoute(app, mockTenantProvider, agent);
   await app.ready();
 
   const mockQStashEvent: InboundSmsEvent = {

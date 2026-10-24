@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { Client } from '@upstash/qstash';
 import { env } from '../config/env.js';
 import { InboundSmsEvent } from '../contracts/inbound-sms.contract.js';
+import { telemetry } from '../telemetry/metrics.js';
 
 interface TelnyxWebhookBody {
   data?: {
@@ -43,6 +44,7 @@ export function registerTelnyxIngestRoute(app: FastifyInstance) {
       }
 
       // 2. Build our lean Data Contract event
+      telemetry.recordSmsReceived();
       const event: InboundSmsEvent = {
         messageId,
         fromPhone,

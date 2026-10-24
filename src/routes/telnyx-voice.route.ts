@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { ITenantProvider } from '../core/types/tenant.js';
 import { env } from '../config/env.js';
+import { telemetry } from '../telemetry/metrics.js';
 
 interface InboundCallBody {
   To?: string;
@@ -34,6 +35,7 @@ export function registerTelnyxVoiceRoutes(
       const dialedNumber = req.body?.To || req.body?.data?.payload?.to || '';
       const callerNumber = req.body?.From || req.body?.data?.payload?.from || '';
 
+      telemetry.recordCallReceived();
       req.log.info({ dialedNumber, callerNumber }, 'Inbound voice call received');
 
       // 1. Resolve Tenant from Sanity
@@ -87,6 +89,7 @@ export function registerTelnyxVoiceRoutes(
       }
 
       // If status is 'no-answer', 'busy', 'failed', or 'canceled', it was a MISSED CALL!
+      telemetry.recordCallMissed();
       req.log.warn({ status, callerNumber }, 'Missed call detected! Triggering instant text-back');
 
       const tenant = await tenantProvider.getTenantByPhoneNumber(dialedNumber);
