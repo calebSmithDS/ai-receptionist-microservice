@@ -60,16 +60,20 @@ export function buildServer() {
   return app;
 }
 
-// Start server when run directly as main entrypoint
-const isDirectRun = process.argv[1] && (process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js'));
+// Start server when run directly as main entrypoint or in production container
+const isDirectRun = !process.env.NODE_ENV || process.env.NODE_ENV === 'production' || 
+  (process.argv[1] && (process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js')));
 
 if (isDirectRun && process.env.NODE_ENV !== 'test') {
   const app = buildServer();
-  app.listen({ port: env.PORT, host: env.HOST }, (err, address) => {
+  const host = env.HOST || '0.0.0.0';
+  const port = env.PORT || 3000;
+
+  app.listen({ port, host }, (err, address) => {
     if (err) {
       console.error('Error starting server:', err);
       process.exit(1);
     }
-    console.log(`\nAI Receptionist Ingest Service listening at: ${address}\n`);
+    console.log(`\n🚀 AI Receptionist Service listening at: ${address}\n`);
   });
 }
