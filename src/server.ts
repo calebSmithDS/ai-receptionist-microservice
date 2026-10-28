@@ -1,83 +1,29 @@
-import Fastify from 'fastify';
-import formbody from '@fastify/formbody';
+import { buildApp } from './app.js';
 import { env } from './config/env.js';
-import { SanityTenantProvider } from './core/providers/sanity-tenant.provider.js';
-import { GeminiReceptionistAgent } from './agent/gemini-receptionist.agent.js';
-import { registerTelnyxIngestRoute } from './routes/telnyx-ingest.route.js';
-import { registerSmsWorkerRoute } from './routes/sms-worker.route.js';
-import { registerTelnyxVoiceRoutes } from './routes/telnyx-voice.route.js';
-import { telemetry } from './telemetry/metrics.js';
 
-export function buildServer() {
-  const isDev = process.env.NODE_ENV !== 'production';
-
-  const app = Fastify({
-    logger: isDev
-      ? {
-          transport: {
-            target: 'pino-pretty',
-            options: {
-              colorize: true,
-              translateTime: 'HH:MM:ss Z',
-              ignore: 'pid,hostname',
-            },
-          },
-        }
-      : true, // In production, use standard high-performance JSON logging
-  });
-
-  // Fastify plugin to parse application/x-www-form-urlencoded payloads from voice webhooks
-  app.register(formbody);
-
-  // Health check endpoint
-  app.get('/health', async () => ({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-  }));
-
-  // Live Telemetry & Metrics endpoint (Global Snapshot)
-  app.get('/metrics', async () => telemetry.getSnapshot());
-
-  // Per-Tenant Telemetry endpoint
-  app.get('/metrics/tenant/:tenantId', async (req, reply) => {
-    const { tenantId } = req.params as { tenantId: string };
-    const metrics = telemetry.getTenantMetrics(tenantId);
-    if (!metrics) {
-      return reply.status(404).send({ error: 'Tenant not found or has no activity yet' });
-    }
-    return { tenantId, ...metrics };
-  });
-
-  // Initialize Core Services
-  const tenantProvider = new SanityTenantProvider({
-    projectId: env.SANITY_PROJECT_ID,
-    dataset: env.SANITY_DATASET,
-    apiVersion: env.SANITY_API_VERSION,
-  });
-  const agent = new GeminiReceptionistAgent();
-
-  // Register Routes
-  registerTelnyxIngestRoute(app);
-  registerSmsWorkerRoute(app, tenantProvider, agent);
-  registerTelnyxVoiceRoutes(app, tenantProvider);
-
-  return app;
-}
-
-// Start server when run directly as main entrypoint or in production container
-const isDirectRun = !process.env.NODE_ENV || process.env.NODE_ENV === 'production' || 
-  (process.argv[1] && (process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js')));
-
-if (isDirectRun && process.env.NODE_ENV !== 'test') {
-  const app = buildServer();
+/**
+ * Local Node.js Development Server Entrypoint
+ * 
+ * In production on Vercel, `api/index.ts` is invoked directly as a serverless function.
+ * For local dev (`npm run dev`), this file boots the Fastify server using `app.listen()`.
+ */
+async function start() {
+  const app = await buildApp();
   const host = env.HOST || '0.0.0.0';
   const port = env.PORT || 3000;
 
-  app.listen({ port, host }, (err, address) => {
-    if (err) {
-      console.error('Error starting server:', err);
-      process.exit(1);
-    }
+  try {
+    const address = await app.listen({ port, host });
     console.log(`\n🚀 AI Receptionist Service listening at: ${address}\n`);
-  });
+    console.log(`📍 Webhooks:`);
+    console.log(`   - Twilio Voice: POST http://localhost:${port}/api/webhooks/twilio/voice`);
+    console.log(`   - Twilio SMS:   POST http://localhost:${port}/api/webhooks/twilio/sms`);
+    console.log(`   - Message Worker: POST http://localhost:${port}/api/workers/process-message`);
+    console.log(`   - Health Check: GET  http://localhost:${port}/health\n`);
+  } catch (err) {
+    console.error('Error starting server:', err);
+    process.exit(1);
+  }
 }
+
+start();

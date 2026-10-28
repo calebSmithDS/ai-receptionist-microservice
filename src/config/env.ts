@@ -23,6 +23,13 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().default('gemini-3.8-flash'),
 
+  // Twilio Telephony
+  TWILIO_ACCOUNT_SID: z.string().optional(),
+  TWILIO_AUTH_TOKEN: z.string().optional(),
+  BUSINESS_OWNER_PHONE: z.string().default('+61400000000'),
+  DEFAULT_BUSINESS_NAME: z.string().default('Apex Plumbing & Gas'),
+  DEFAULT_SERVICE_AREA: z.string().default('Sydney Eastern Suburbs & Inner West'),
+
   // Telnyx (Optional for testing)
   TELNYX_API_KEY: z.string().optional(),
 });
