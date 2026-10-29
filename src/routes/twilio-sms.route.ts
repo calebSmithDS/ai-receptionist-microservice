@@ -90,9 +90,14 @@ export function registerTwilioSmsRoutes(app: FastifyInstance) {
             deduplicationId: messageSid, // Guarantees carrier duplicate retries are dropped
           });
           req.log.info({ messageSid, destinationWorkerUrl }, 'SMS event published to QStash');
-        } catch (err) {
-          req.log.error({ err, messageSid }, 'Failed to publish SMS event to QStash');
-          return reply.status(500).send({ error: 'Failed to queue SMS event' });
+        } catch (err: any) {
+          const errMsg = err?.message || JSON.stringify(err);
+          if (errMsg.includes('loopback address') || destinationWorkerUrl.includes('localhost')) {
+            req.log.warn({ destinationWorkerUrl }, '[QStash Local Dev] QStash cloud cannot hit localhost; simulated successful publish');
+          } else {
+            req.log.error({ err, messageSid }, 'Failed to publish SMS event to QStash');
+            return reply.status(500).send({ error: 'Failed to queue SMS event' });
+          }
         }
       } else {
         req.log.info(

@@ -96,10 +96,15 @@ export function registerTwilioVoiceRoutes(app: FastifyInstance) {
             { callSid, destinationWorkerUrl, delaySeconds: 30 },
             'Missed call job published to QStash successfully'
           );
-        } catch (err) {
-          req.log.error({ err, callSid }, 'Failed to publish missed call job to QStash');
-          // If queuing fails, return HTTP 500 so Twilio fallback URL or carrier retries can kick in
-          return reply.status(500).send({ error: 'Failed to queue missed call task' });
+        } catch (err: any) {
+          const errMsg = err?.message || JSON.stringify(err);
+          if (errMsg.includes('loopback address') || destinationWorkerUrl.includes('localhost')) {
+            req.log.warn({ destinationWorkerUrl }, '[QStash Local Dev] QStash cloud cannot hit localhost; simulated successful publish');
+          } else {
+            req.log.error({ err, callSid }, 'Failed to publish missed call job to QStash');
+            // If queuing fails, return HTTP 500 so Twilio fallback URL or carrier retries can kick in
+            return reply.status(500).send({ error: 'Failed to queue missed call task' });
+          }
         }
       } else {
         // Fallback simulation for local dev

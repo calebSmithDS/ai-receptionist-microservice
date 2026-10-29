@@ -224,7 +224,7 @@ export function registerProcessMessageWorkerRoute(
             }
 
             case 'SEND_COMPLETION_SMS': {
-              const closingMessage = `Thanks ${currentSession.collectedData.customerName || ''}! I've logged your request and alerted the team at ${businessName}. They will be in touch shortly to confirm arrival.`.trim();
+              const closingMessage = action.customMessage || `Thanks ${currentSession.collectedData.customerName || ''}! I've logged your request and alerted the team at ${businessName}. They will be in touch shortly to confirm arrival.`.trim();
 
               await twilio.sendSms({
                 from: dialedNumber,

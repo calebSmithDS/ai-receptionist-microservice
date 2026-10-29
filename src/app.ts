@@ -19,7 +19,12 @@ import { env } from './config/env.js';
  * 1. By `api/index.ts` inside Vercel Serverless Functions
  * 2. By `src/server.ts` for local Node.js development
  */
-export async function buildApp(): Promise<FastifyInstance> {
+export interface AppOptions {
+  sessionStore?: SessionStore;
+  tenantProvider?: CachedTenantProvider;
+}
+
+export async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
   const isDev = process.env.NODE_ENV !== 'production';
 
   const app = Fastify({
@@ -54,13 +59,13 @@ export async function buildApp(): Promise<FastifyInstance> {
   registerTwilioSmsRoutes(app);
 
   // Initialize Core Services for Worker
-  const sessionStore = new SessionStore();
+  const sessionStore = options.sessionStore || new SessionStore();
   const geminiEvaluator = new GeminiQualificationEvaluator();
   const twilioClient = new TwilioSmsClient();
 
   // Multi-tenant configuration: Sanity CMS wrapped with Upstash Redis 1-hour caching
-  const redis = process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
-    ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN })
+  const redis = env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN
+    ? new Redis({ url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN })
     : null;
 
   const sanityProvider = new SanityTenantProvider({
@@ -69,7 +74,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     apiVersion: env.SANITY_API_VERSION,
   });
 
-  const cachedTenantProvider = new CachedTenantProvider({
+  const cachedTenantProvider = options.tenantProvider || new CachedTenantProvider({
     underlyingProvider: sanityProvider,
     redis,
     ttlSeconds: 3600, // 1 hour TTL

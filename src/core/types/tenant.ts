@@ -11,11 +11,13 @@ export interface TenantService {
 export interface TenantContext {
   tenantId: string;
   businessName: string;
+  tradeType?: string; // e.g. 'plumber', 'electrician', 'locksmith', 'builder'
   publicPhone: string;
   twilioForwardingNumber: string;
   serviceArea: string;
   businessHours?: string;
   aiCustomInstructions?: string;
+  emergencyTriageAdvice?: string; // e.g. "Advise customer to turn off mains water meter" or "Turn off main safety switch"
   services: TenantService[];
   customDomain?: string; // Optional domain for Astro WaaS webhook dispatch
 }

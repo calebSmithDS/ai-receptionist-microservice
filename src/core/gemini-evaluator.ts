@@ -40,11 +40,11 @@ export class GeminiQualificationEvaluator {
         properties: {
           customerName: {
             type: Type.STRING,
-            description: 'Name of the customer if mentioned (e.g. "Dave", "Sarah")',
+            description: 'Customer first or full name (MANDATORY before isFullyQualified can be true)',
           },
           suburb: {
             type: Type.STRING,
-            description: 'Location or suburb of the job (e.g. "Coogee", "Bondi")',
+            description: 'Location or suburb of the job (e.g. "Glenelg", "Rose Park")',
           },
           issue: {
             type: Type.STRING,
@@ -57,11 +57,15 @@ export class GeminiQualificationEvaluator {
           },
           isFullyQualified: {
             type: Type.BOOLEAN,
-            description: 'Set to true ONLY if you now have: (1) suburb/location, (2) clear issue description, and (3) urgency assessed.',
+            description: 'Set to true ONLY when you have ALL 4: (1) customerName, (2) suburb, (3) specific issue, and (4) urgency.',
           },
           followUpQuestion: {
             type: Type.STRING,
-            description: 'Short SMS question to ask the customer if details are still missing (max 1-2 sentences).',
+            description: 'Short SMS response to the customer. If details are missing, ask for what is missing (e.g. name or suburb) in a warm, helpful Australian trades tone.',
+          },
+          completionMessage: {
+            type: Type.STRING,
+            description: 'Contextual, reassuring closing SMS to the customer when isFullyQualified is true. Acknowledge their issue, mention their name, and give safety advice if applicable (e.g. turning off mains tap).',
           },
           isEscalated: {
             type: Type.BOOLEAN,
@@ -103,6 +107,12 @@ export class GeminiQualificationEvaluator {
       ? tenant.services.map(s => `- ${s.title}: starting from ${s.startingPrice || 'standard call-out fee'} (${s.shortDescription || ''})`).join('\n')
       : 'General trade and repair services.';
 
+    const tradeTitle = tenant.tradeType ? `${tenant.tradeType} professional` : 'trades professional';
+
+    const emergencySection = tenant.emergencyTriageAdvice
+      ? `4. EMERGENCY SAFETY ADVICE: If an active emergency or urgent danger is described, immediately provide this specific advice: "${tenant.emergencyTriageAdvice}"`
+      : '4. EMERGENCY SAFETY ADVICE: If an urgent emergency is described, prioritize getting the technician to call them immediately.';
+
     const systemInstruction = `You are the smart SMS dispatcher for "${tenant.businessName}".
 Your service area covers: "${tenant.serviceArea}".
 Business Hours: ${tenant.businessHours || 'Standard business hours. Emergency call-out fee applies after hours.'}
@@ -113,14 +123,18 @@ ${servicesList}
 CUSTOM OWNER INSTRUCTIONS:
 ${tenant.aiCustomInstructions || 'Be friendly, concise, and helpful.'}
 
-CRITICAL RULES & BOUNDARIES:
-1. Keep all SMS responses under 2 short sentences.
-2. ONLY reference services listed above. If a customer asks for a service not listed, say: "We don't specialize in that, but we can recommend looking for a specialist."
-3. NEVER guess, estimate, or quote fixed repair prices over SMS. Always explain that the technician provides an upfront quote on-site once inspected.
-4. Your mission is to gather: (1) Suburb/address, (2) Specific issue, (3) Urgency level, (4) Customer name.
-5. If any critical info is missing, ask for ONLY what is missing in a single short question.
-6. When you have (suburb + issue + urgency), call the tool "submit_qualification" with isFullyQualified = true.
-7. If the customer explicitly asks for a human, expresses severe frustration, or is outside "${tenant.serviceArea}", set isEscalated = true.
+CRITICAL RULES & TRADIE PERSONA:
+1. Tone: Warm, helpful, down-to-earth Australian ${tradeTitle}. Keep all SMS responses under 2-3 short sentences.
+2. MANDATORY FIELDS: You MUST collect all 4 items before completing qualification:
+   (a) Customer Name (Always ask: "Who am I speaking with?" or "Could I grab your name?")
+   (b) Suburb or address
+   (c) Specific issue
+   (d) Urgency level
+3. NEVER set isFullyQualified = true if customerName is unknown! Ask for their name along with any missing details.
+${emergencySection}
+5. SERVICES GUARD: ONLY offer and confirm services listed in SERVICES OFFERED above. If they ask for work outside these services, politely say: "We don't specialize in that kind of work, but we can recommend looking for a specialist."
+6. NEVER quote fixed repair prices over SMS. Always mention that the technician provides an upfront quote on-site once inspected.
+7. OUT OF AREA: If they are outside "${tenant.serviceArea}", set isEscalated = true.
 8. Previously captured data so far: ${JSON.stringify(input.previouslyCollected)}.`;
 
     // Map conversation history into Gemini's multi-turn contents
@@ -164,7 +178,7 @@ CRITICAL RULES & BOUNDARIES:
               issue: args.issue,
               urgency: args.urgency as LeadUrgency,
             },
-            replyText: args.followUpQuestion || response.text || undefined,
+            replyText: (args.isFullyQualified ? (args.completionMessage || args.followUpQuestion) : args.followUpQuestion) || response.text || undefined,
             isEscalated: !!args.isEscalated,
             escalationReason: args.escalationReason,
           };
@@ -182,6 +196,18 @@ CRITICAL RULES & BOUNDARIES:
 
       // Intelligent local simulation for testing without network
       const textLower = (input.latestMessage + ' ' + input.history.map(h => h.content).join(' ')).toLowerCase();
+      
+      // Escalation simulation
+      if (textLower.includes('human') || textLower.includes('bot') || textLower.includes('waiting') || textLower.includes('angry')) {
+        return {
+          isFullyQualified: false,
+          isEscalated: true,
+          escalationReason: textLower.includes('human') ? 'HUMAN_REQUEST' : 'ANGER',
+          extracted: {},
+          replyText: 'No problem! I have alerted our team lead directly. They will call you as soon as possible.',
+        };
+      }
+
       const hasSuburb = textLower.includes('maroubra') || textLower.includes('coogee') || textLower.includes('bondi') || textLower.includes('clovelly');
       const hasIssue = textLower.includes('drain') || textLower.includes('pipe') || textLower.includes('leak') || textLower.includes('flooding');
       const hasUrgency = textLower.includes('urgent') || textLower.includes('emergency') || textLower.includes('overflowing') || textLower.includes('flooding');

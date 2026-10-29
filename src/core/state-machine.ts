@@ -46,6 +46,7 @@ export type MachineAction =
     }
   | {
       type: 'SEND_COMPLETION_SMS';
+      customMessage?: string;
     }
   | {
       type: 'ALERT_OWNER_ESCALATION';
@@ -140,7 +141,7 @@ export const TRANSITION_TABLE: {
           target: 'COMPLETED',
           actions: [
             { type: 'DISPATCH_LEAD_TO_OWNER', lead: mergedData },
-            { type: 'SEND_COMPLETION_SMS' },
+            { type: 'SEND_COMPLETION_SMS', customMessage: event.followUpQuestion },
           ],
           updatedState: {
             collectedData: mergedData,

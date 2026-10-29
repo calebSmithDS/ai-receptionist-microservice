@@ -62,11 +62,13 @@ export class SanityTenantProvider implements ITenantProvider {
     const query = `*[_type == "tenant" && (twilioForwardingNumber == $primary || twilioForwardingNumber == $alternate)][0]{
       tenantId,
       businessName,
+      tradeType,
       publicPhone,
       twilioForwardingNumber,
       serviceArea,
       businessHours,
       aiCustomInstructions,
+      emergencyTriageAdvice,
       customDomain,
       "services": *[_type == "service" && references(^._id)]{
         title,

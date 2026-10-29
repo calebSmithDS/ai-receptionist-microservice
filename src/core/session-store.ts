@@ -5,6 +5,7 @@ import {
   buildSessionKey,
   createInitialSession,
 } from '../contracts/session-state.contract.js';
+import { env } from '../config/env.js';
 
 export interface SessionStoreOptions {
   redisUrl?: string;
@@ -20,8 +21,8 @@ export class SessionStore {
   private readonly defaultTtl: number;
 
   constructor(options: SessionStoreOptions = {}) {
-    const url = options.redisUrl || process.env.UPSTASH_REDIS_REST_URL;
-    const token = options.redisToken || process.env.UPSTASH_REDIS_REST_TOKEN;
+    const url = options.redisUrl || env.UPSTASH_REDIS_REST_URL;
+    const token = options.redisToken || env.UPSTASH_REDIS_REST_TOKEN;
     this.defaultTtl = options.defaultTtlSeconds || 86400;
 
     if (url && token) {
