@@ -11,6 +11,7 @@ export interface TenantService {
 export interface TenantContext {
   tenantId: string;
   businessName: string;
+  ownerFirstName?: string; // Explicit tradie first name from Sanity CMS (e.g. "Caleb")
   tradeType?: string; // e.g. 'plumber', 'electrician', 'locksmith', 'builder'
   publicPhone: string;
   twilioForwardingNumber: string;
@@ -19,6 +20,7 @@ export interface TenantContext {
   aiCustomInstructions?: string;
   emergencyTriageAdvice?: string; // e.g. "Advise customer to turn off mains water meter" or "Turn off main safety switch"
   services: TenantService[];
+  excludedServices?: string[]; // Explicit blacklist of jobs the tradie does NOT take (e.g. ['Commercial roofing', 'Solar'])
   customDomain?: string; // Optional domain for Astro WaaS webhook dispatch
 }
 

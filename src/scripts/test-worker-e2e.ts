@@ -1,6 +1,7 @@
 import { SessionStore } from '../core/session-store.js';
 import { GeminiQualificationEvaluator } from '../core/gemini-evaluator.js';
 import { TwilioSmsClient } from '../core/twilio-client.js';
+import { ServiceM8RestClient } from '../core/servicem8-client.js';
 import { CachedTenantProvider } from '../core/providers/cached-tenant.provider.js';
 import { ITenantProvider, TenantContext } from '../core/types/tenant.js';
 import { registerProcessMessageWorkerRoute } from '../routes/process-message.worker.js';
@@ -13,6 +14,7 @@ async function testWorkerE2E() {
   const sessionStore = new SessionStore();
   const gemini = new GeminiQualificationEvaluator();
   const twilio = new TwilioSmsClient();
+  const servicem8 = new ServiceM8RestClient();
 
   // Mock Sanity provider
   const mockSanityProvider: ITenantProvider = {
@@ -34,7 +36,7 @@ async function testWorkerE2E() {
     ttlSeconds: 3600,
   });
 
-  registerProcessMessageWorkerRoute(app, sessionStore, gemini, twilio, cachedTenantProvider);
+  registerProcessMessageWorkerRoute(app, sessionStore, gemini, twilio, cachedTenantProvider, servicem8);
   await app.ready();
 
   const callerNumber = '+61499112233';

@@ -11,6 +11,7 @@ export interface SessionStoreOptions {
   redisUrl?: string;
   redisToken?: string;
   defaultTtlSeconds?: number;
+  useMemoryOnly?: boolean;
 }
 
 export class SessionStore {
@@ -21,12 +22,14 @@ export class SessionStore {
   private readonly defaultTtl: number;
 
   constructor(options: SessionStoreOptions = {}) {
-    const url = options.redisUrl || env.UPSTASH_REDIS_REST_URL;
-    const token = options.redisToken || env.UPSTASH_REDIS_REST_TOKEN;
     this.defaultTtl = options.defaultTtlSeconds || 86400;
 
-    if (url && token) {
-      this.redis = new Redis({ url, token });
+    if (!options.useMemoryOnly) {
+      const url = options.redisUrl || env.UPSTASH_REDIS_REST_URL;
+      const token = options.redisToken || env.UPSTASH_REDIS_REST_TOKEN;
+      if (url && token) {
+        this.redis = new Redis({ url, token });
+      }
     }
   }
 

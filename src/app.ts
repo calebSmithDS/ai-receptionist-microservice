@@ -3,9 +3,11 @@ import formbody from '@fastify/formbody';
 import { registerTwilioVoiceRoutes } from './routes/twilio-voice.route.js';
 import { registerTwilioSmsRoutes } from './routes/twilio-sms.route.js';
 import { registerProcessMessageWorkerRoute } from './routes/process-message.worker.js';
+import { registerDemoRoutes } from './routes/demo.route.js';
 import { SessionStore } from './core/session-store.js';
 import { GeminiQualificationEvaluator } from './core/gemini-evaluator.js';
 import { TwilioSmsClient } from './core/twilio-client.js';
+import { ServiceM8RestClient } from './core/servicem8-client.js';
 import { SanityTenantProvider } from './core/providers/sanity-tenant.provider.js';
 import { CachedTenantProvider } from './core/providers/cached-tenant.provider.js';
 import { Redis } from '@upstash/redis';
@@ -62,6 +64,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   const sessionStore = options.sessionStore || new SessionStore();
   const geminiEvaluator = new GeminiQualificationEvaluator();
   const twilioClient = new TwilioSmsClient();
+  const servicem8Client = new ServiceM8RestClient();
 
   // Multi-tenant configuration: Sanity CMS wrapped with Upstash Redis 1-hour caching
   const redis = env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN
@@ -86,7 +89,18 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     sessionStore,
     geminiEvaluator,
     twilioClient,
-    cachedTenantProvider
+    cachedTenantProvider,
+    servicem8Client
+  );
+
+  // Interactive Web Simulator Demo (Option A: Mobile preview for client testing)
+  registerDemoRoutes(
+    app,
+    sessionStore,
+    geminiEvaluator,
+    twilioClient,
+    cachedTenantProvider,
+    servicem8Client
   );
 
   return app;

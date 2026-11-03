@@ -8,6 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
+    "test:level1": "tsx src/scripts/test-level-1.ts",
+    "test:level2": "tsx src/scripts/test-level-2.ts",
     "simulate": "tsx src/scripts/simulator-cli.ts"
   },
   "dependencies": {

@@ -35,6 +35,10 @@ const envSchema = z.object({
   BUSINESS_OWNER_PHONE: z.string().default('+61481880277'),
   DEFAULT_BUSINESS_NAME: z.string().default('Apex Plumbing & Gas'),
   DEFAULT_SERVICE_AREA: z.string().default('Sydney Eastern Suburbs & Inner West'),
+
+  // ServiceM8 CRM (optional — simulation mode when absent)
+  SERVICEM8_EMAIL: z.string().email().optional(),
+  SERVICEM8_API_KEY: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);

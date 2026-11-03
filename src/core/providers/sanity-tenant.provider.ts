@@ -62,6 +62,7 @@ export class SanityTenantProvider implements ITenantProvider {
     const query = `*[_type == "tenant" && (twilioForwardingNumber == $primary || twilioForwardingNumber == $alternate)][0]{
       tenantId,
       businessName,
+      ownerFirstName,
       tradeType,
       publicPhone,
       twilioForwardingNumber,
@@ -69,6 +70,7 @@ export class SanityTenantProvider implements ITenantProvider {
       businessHours,
       aiCustomInstructions,
       emergencyTriageAdvice,
+      excludedServices,
       customDomain,
       "services": *[_type == "service" && references(^._id)]{
         title,

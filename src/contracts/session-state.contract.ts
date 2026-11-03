@@ -2,12 +2,14 @@ import { z } from 'zod';
 
 /**
  * State Machine Statuses
- * 
- * - INIT: Call missed. QStash job scheduled to send greeting SMS with a 30s delay.
+ *
+ * - INIT:          Call missed. QStash job scheduled to send greeting SMS with a 30s delay.
  * - AWAITING_REPLY: Greeting sent. Waiting for customer SMS.
- * - QUALIFYING: Reply received. LLM evaluated. Missing data triggers follow-up SMS.
- * - COMPLETED: LLM successfully extracted {suburb, issue, urgency}. Job brief dispatched.
- * - ESCALATED: LLM detects anger, out-of-bounds request, or human request. Halts AI automation.
+ * - QUALIFYING:    Reply received. LLM evaluated. Missing data triggers follow-up SMS.
+ * - COMPLETED:     LLM successfully extracted all fields. Lead dispatched to ServiceM8.
+ * - ESCALATED:     LLM detects anger, out-of-bounds, or human request. Halts AI automation.
+ * - TERMINATED:    Detected as telemarketer / spam. No outbound SMS is ever sent.
+ * - ABANDONED:     Customer failed to qualify after 5+ messages. AI silently drops all future webhooks.
  */
 export const SessionStatusSchema = z.enum([
   'INIT',
@@ -15,6 +17,8 @@ export const SessionStatusSchema = z.enum([
   'QUALIFYING',
   'COMPLETED',
   'ESCALATED',
+  'TERMINATED',
+  'ABANDONED',
 ]);
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 
@@ -36,8 +40,10 @@ export const LeadUrgencySchema = z.enum(['LOW', 'MEDIUM', 'HIGH', 'EMERGENCY']);
 export type LeadUrgency = z.infer<typeof LeadUrgencySchema>;
 
 /**
- * Structured job details extracted by the LLM
- * Supports Visual Triage (MMS) via mediaUrls
+ * Structured job details extracted by the LLM.
+ * Supports Visual Triage (MMS) via mediaUrls.
+ * `intent` drives the spam sinkhole: if Gemini classifies as solicitation/spam,
+ * the worker transitions to TERMINATED and sends zero outbound SMS.
  */
 export const CollectedJobDetailsSchema = z.object({
   customerName: z.string().nullable().optional(),
@@ -45,6 +51,7 @@ export const CollectedJobDetailsSchema = z.object({
   issue: z.string().nullable().optional(),
   urgency: LeadUrgencySchema.nullable().optional(),
   mediaUrls: z.array(z.string().url()).default([]),
+  intent: z.enum(['customer_lead', 'solicitation', 'spam']).optional(),
 });
 export type CollectedJobDetails = z.infer<typeof CollectedJobDetailsSchema>;
 
@@ -64,7 +71,7 @@ export type ConversationTurn = z.infer<typeof ConversationTurnSchema>;
  * Escalation tracking when AI hands off to human
  */
 export const EscalationDetailsSchema = z.object({
-  reason: z.enum(['ANGER', 'HUMAN_REQUEST', 'OUT_OF_BOUNDS', 'MAX_TURNS_EXCEEDED', 'UNKNOWN']),
+  reason: z.enum(['ANGER', 'HUMAN_REQUEST', 'OUT_OF_BOUNDS', 'MAX_TURNS_EXCEEDED', 'DANGER_HAZARD', 'UNKNOWN']),
   detectedAt: z.string().datetime(),
   notes: z.string().optional(),
 });
@@ -98,6 +105,13 @@ export const SessionStateSchema = z.object({
   metadata: z.object({
     callSid: z.string().optional(),
     turnCount: z.number().int().nonnegative().default(0),
+    userMessageCount: z.number().int().nonnegative().default(0),
+    /**
+     * stallCount: counts consecutive customer messages with ZERO newly extracted data.
+     * Resets to 0 whenever a new field (name, suburb, issue, urgency) is collected.
+     * Powers the Anti-Loop: ultimatum at stallCount == 3, ABANDONED at stallCount >= 4.
+     */
+    stallCount: z.number().int().nonnegative().default(0),
     lastInboundAt: z.string().datetime(),
     lastOutboundAt: z.string().datetime().optional(),
   }),
@@ -139,6 +153,8 @@ export function createInitialSession(params: {
     metadata: {
       callSid: params.callSid,
       turnCount: 0,
+      userMessageCount: 0,
+      stallCount: 0,
       lastInboundAt: now,
     },
     createdAt: now,

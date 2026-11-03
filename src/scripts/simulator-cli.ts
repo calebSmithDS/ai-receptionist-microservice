@@ -42,19 +42,25 @@ async function startSimulator() {
   const calebTenant: TenantContext = {
     tenantId: 'tenant_caleb_plumbing',
     businessName: "Caleb's Emergency Plumbing & Gas",
+    ownerFirstName: 'Caleb',
     tradeType: 'plumber',
     publicPhone: ownerMobile,
     twilioForwardingNumber: twilioVirtualNumber,
     serviceArea: 'Adelaide Metro, Glenelg, Brighton, Norwood',
     businessHours: 'Monday to Friday 7am-5pm. 24/7 Emergency call-outs.',
     aiCustomInstructions:
-      'Friendly Aussie tradie tone. Always confirm if water is actively gushing before booking. Do not promise exact arrival times; let them know Caleb will call directly.',
+      'Friendly Aussie tradie tone. If an active leak or burst pipe is mentioned, check if water is currently flowing. Do not promise exact arrival times; let them know Caleb will call directly.',
     emergencyTriageAdvice:
       'Advise customer to locate and turn off their main water meter isolation tap at the front of the house to stop water damage while waiting!',
     services: [
       { title: 'Blocked Drains', startingPrice: 'From $150' },
       { title: 'Burst Pipe Repair', startingPrice: 'From $180 call-out' },
       { title: 'Hot Water Replacement', startingPrice: 'Quote on site' },
+    ],
+    excludedServices: [
+      'Commercial roofing',
+      'Solar hot water panel installation',
+      'Asbestos removal',
     ],
   };
 
@@ -144,7 +150,7 @@ async function startSimulator() {
   });
 
   console.log(`${color.bright}You can now text the bot! Type your message and hit Enter.${color.reset}`);
-  console.log(`${color.dim}(Type "exit" to quit, or "reset" to start over)${color.reset}\n`);
+  console.log(`${color.dim}(Type "r" or "reset" to start a new chat, "exit" to quit)${color.reset}\n`);
 
   const promptUser = () => {
     rl.question(`${color.blue}${color.bright}👤 You (Customer SMS): ${color.reset}`, async (input) => {
@@ -161,9 +167,10 @@ async function startSimulator() {
         process.exit(0);
       }
 
-      if (text.toLowerCase() === 'reset') {
+      if (text.toLowerCase() === 'reset' || text.toLowerCase() === 'r') {
         await sessionStore.deleteSession(calebTenant.tenantId, customerMobile);
-        console.log(`\n${color.yellow}🔄 Session reset in Redis! Restarting...${color.reset}\n`);
+        console.clear();
+        console.log(`\n${color.yellow}🔄 Session reset in Redis! Starting fresh conversation...${color.reset}\n`);
         rl.close();
         startSimulator();
         return;
@@ -203,8 +210,21 @@ async function startSimulator() {
         console.log(`   Phone: ${customerMobile}`);
         console.log(`   Suburb: ${updatedSession.collectedData.suburb}`);
         console.log(`   Issue: ${updatedSession.collectedData.issue}`);
-        console.log(`   Urgency: ${updatedSession.collectedData.urgency}${color.reset}`);
+        console.log(`   Urgency: ${updatedSession.collectedData.urgency}`);
+        console.log(`   ServiceM8 Sync: ${updatedSession.crmSync?.status === 'SYNCED' ? '✅ Logged in Inbox' : '⚠️ ' + (updatedSession.crmSync?.error || 'Pending')}${color.reset}`);
         console.log(`${color.bright}${color.yellow}============================================================${color.reset}`);
+      } else if (updatedSession?.status === 'TERMINATED') {
+        console.log(`\n${color.bright}${color.magenta}============================================================${color.reset}`);
+        console.log(`🛑 ${color.bright}${color.magenta}SPAM SINKHOLE TRIGGERED (ABS-01):${color.reset}`);
+        console.log(`${color.magenta}   Intent: ${updatedSession.collectedData.intent || 'spam'}`);
+        console.log(`   Action: Session TERMINATED. 0 outbound SMS sent. $0 cost.${color.reset}`);
+        console.log(`${color.bright}${color.magenta}============================================================${color.reset}`);
+      } else if (updatedSession?.status === 'ABANDONED') {
+        console.log(`\n${color.bright}${color.dim}============================================================${color.reset}`);
+        console.log(`🔇 ${color.bright}ANTI-LOOP ABANDONED (ABS-04):${color.reset}`);
+        console.log(`   User message count reached threshold without qualification.`);
+        console.log(`   Action: Session ABANDONED. All future webhooks dropped silently.${color.reset}`);
+        console.log(`${color.bright}${color.dim}============================================================${color.reset}`);
       } else if (updatedSession?.status === 'ESCALATED') {
         console.log(`\n${color.bright}${color.red}============================================================${color.reset}`);
         console.log(`🚨 ${color.bright}${color.red}ESCALATION TRIGGERED! AI HALTED & TRADIE ALERTED:${color.reset}`);
