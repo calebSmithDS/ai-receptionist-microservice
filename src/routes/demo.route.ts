@@ -5,6 +5,7 @@ import { TwilioSmsClient } from '../core/twilio-client.js';
 import { ServiceM8RestClient } from '../core/servicem8-client.js';
 import { CachedTenantProvider } from '../core/providers/cached-tenant.provider.js';
 import { ITenantProvider, TenantContext } from '../core/types/tenant.js';
+import { processMessageEvent } from '../core/services/message-dispatcher.js';
 
 interface DemoChatPayload {
   message?: string;
@@ -21,6 +22,17 @@ export function registerDemoRoutes(
   tenantProvider: CachedTenantProvider,
   servicem8: ServiceM8RestClient
 ) {
+  // Direct worker function call - bypasses HTTP / light-my-request entirely!
+  async function invokeWorkerDirectly(payload: any) {
+    return processMessageEvent(payload, {
+      sessionStore,
+      gemini,
+      twilio,
+      tenantProvider,
+      servicem8,
+      logger: app.log,
+    });
+  }
   // ── 1. Serve the interactive mobile phone simulator UI ─────────────────
   app.get('/demo', async (_req: FastifyRequest, reply: FastifyReply) => {
     reply.type('text/html');
@@ -68,17 +80,13 @@ export function registerDemoRoutes(
         await sessionStore.deleteSession(businessId, callerId);
         
         // Trigger missed call via internal worker invocation
-        const workerRes = await app.inject({
-          method: 'POST',
-          url: '/api/workers/process-message',
-          payload: {
-            eventType: 'MISSED_CALL',
-            channel: 'twilio_voice',
-            callerNumber: callerId,
-            dialedNumber,
-            businessId,
-            receivedAt: new Date().toISOString(),
-          },
+        await invokeWorkerDirectly({
+          eventType: 'MISSED_CALL',
+          channel: 'twilio_voice',
+          callerNumber: callerId,
+          dialedNumber,
+          businessId,
+          receivedAt: new Date().toISOString(),
         });
 
         const session = await sessionStore.getSession(businessId, callerId);
@@ -90,18 +98,14 @@ export function registerDemoRoutes(
       }
 
       // Customer sends an SMS message
-      const workerRes = await app.inject({
-        method: 'POST',
-        url: '/api/workers/process-message',
-        payload: {
-          eventType: 'INBOUND_SMS',
-          channel: 'twilio_sms',
-          callerNumber: callerId,
-          dialedNumber,
-          businessId,
-          body: message,
-          receivedAt: new Date().toISOString(),
-        },
+      await invokeWorkerDirectly({
+        eventType: 'INBOUND_SMS',
+        channel: 'twilio_sms',
+        callerNumber: callerId,
+        dialedNumber,
+        businessId,
+        body: message,
+        receivedAt: new Date().toISOString(),
       });
 
       const session = await sessionStore.getSession(businessId, callerId);
