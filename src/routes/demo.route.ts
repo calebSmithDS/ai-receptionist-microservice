@@ -520,18 +520,25 @@ Hot Water Replacement: Quote on site</textarea>
     }
 
     async function initGreeting() {
-      const res = await fetch('/api/demo/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          isMissedCall: true,
-          callerId: callerId,
-          tenantConfig: getTenantConfig(),
-        }),
-      });
-      const data = await res.json();
-      if (data.initialGreeting) {
-        addMessage(data.initialGreeting, false);
+      try {
+        const res = await fetch('/api/demo/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            isMissedCall: true,
+            callerId: callerId,
+            tenantConfig: getTenantConfig(),
+          }),
+        });
+        const data = await res.json();
+        if (data && data.initialGreeting) {
+          addMessage(data.initialGreeting, false);
+        } else {
+          addMessage("Hi, this is Caleb's assistant. He's on the tools right now. How can we help you today?", false);
+        }
+      } catch (err) {
+        console.error('Init greeting error:', err);
+        addMessage("Hi, this is Caleb's assistant. He's on the tools right now. How can we help you today?", false);
       }
     }
 
@@ -585,7 +592,7 @@ Hot Water Replacement: Quote on site</textarea>
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: pendingMessageBuffer.join('\\n'),
+          message: pendingMessageBuffer.join('\n'),
           callerId: callerId,
           tenantConfig: getTenantConfig(),
         }),
