@@ -145,7 +145,7 @@ function getDemoHtml(): string {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Tradie AI Receptionist - Mobile Preview</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&family=SF+Pro+Text:wght@400;500&display=swap" rel="stylesheet">
@@ -166,6 +166,7 @@ function getDemoHtml(): string {
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       min-height: 100vh;
+      min-height: 100dvh;
       display: flex;
       justify-content: center;
       align-items: center;
@@ -175,6 +176,7 @@ function getDemoHtml(): string {
       width: 100%;
       max-width: 440px;
       height: 90vh;
+      height: 90dvh;
       max-height: 840px;
       background: #000;
       border-radius: 44px;
@@ -185,9 +187,23 @@ function getDemoHtml(): string {
       overflow: hidden;
       position: relative;
     }
+    @media (max-width: 600px) {
+      body {
+        padding: 0;
+        background: #000;
+      }
+      .app-container {
+        height: 100vh;
+        height: 100dvh;
+        max-height: 100dvh;
+        border-radius: 0;
+        border: none;
+        box-shadow: none;
+      }
+    }
     /* iOS Status & Header */
     .ios-header {
-      padding: 18px 20px 12px;
+      padding: calc(14px + env(safe-area-inset-top, 0px)) 20px 12px;
       background: rgba(22, 27, 34, 0.95);
       backdrop-filter: blur(20px);
       border-bottom: 1px solid rgba(255,255,255,0.1);
@@ -224,6 +240,11 @@ function getDemoHtml(): string {
       border-radius: 14px;
       font-size: 12px;
       cursor: pointer;
+      position: relative;
+      z-index: 50;
+      touch-action: manipulation;
+      -webkit-user-select: none;
+      user-select: none;
     }
     /* Chat stream */
     .messages-container {
@@ -272,7 +293,7 @@ function getDemoHtml(): string {
     }
     /* Bottom bar */
     .chat-input-bar {
-      padding: 10px 14px 20px;
+      padding: 10px 14px calc(14px + env(safe-area-inset-bottom, 0px));
       background: rgba(22, 27, 34, 0.95);
       border-top: 1px solid rgba(255,255,255,0.1);
       display: flex;
@@ -286,7 +307,7 @@ function getDemoHtml(): string {
       color: #fff;
       padding: 10px 16px;
       border-radius: 20px;
-      font-size: 14.5px;
+      font-size: 16px; /* 16px prevents iOS Safari from automatically zooming into the page */
       outline: none;
     }
     .chat-input:focus { border-color: #58a6ff; }
@@ -309,13 +330,20 @@ function getDemoHtml(): string {
       position: absolute;
       top: 0; left: 0; right: 0; bottom: 0;
       background: #161b22;
-      z-index: 100;
+      z-index: 1000;
       padding: 24px 20px;
       overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      pointer-events: none;
+      opacity: 0;
       transform: translateY(100%);
-      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
     }
-    .config-drawer.open { transform: translateY(0); }
+    .config-drawer.open {
+      pointer-events: auto;
+      opacity: 1;
+      transform: translateY(0);
+    }
     .drawer-title { font-size: 18px; font-weight: 700; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
     .form-group { margin-bottom: 14px; }
     .form-group label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px; font-weight: 600; text-transform: uppercase; }
@@ -326,7 +354,7 @@ function getDemoHtml(): string {
       color: #fff;
       padding: 8px 12px;
       border-radius: 10px;
-      font-size: 13.5px;
+      font-size: 16px; /* 16px prevents iOS Safari auto-zoom on focus */
     }
     .btn-apply {
       width: 100%;
@@ -376,7 +404,7 @@ function getDemoHtml(): string {
         <div class="contact-name" id="displayBizName">Caleb's Plumbing</div>
         <div class="contact-status" id="displayStatus">AI Receptionist Active</div>
       </div>
-      <button class="btn-toggle-config" onclick="toggleDrawer()">⚙️ Rules</button>
+      <button class="btn-toggle-config" id="btnToggleConfig" onclick="toggleDrawer(event)" type="button">⚙️ Rules</button>
     </div>
 
     <!-- Messages -->
@@ -443,8 +471,15 @@ Hot Water Replacement: Quote on site</textarea>
   <script>
     let callerId = '+61499' + Math.floor(100000 + Math.random() * 900000);
 
-    function toggleDrawer() {
-      document.getElementById('configDrawer').classList.toggle('open');
+    function toggleDrawer(e) {
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      const drawer = document.getElementById('configDrawer');
+      if (drawer) {
+        drawer.classList.toggle('open');
+      }
     }
 
     function addMessage(text, isUser = false) {
@@ -497,8 +532,13 @@ Hot Water Replacement: Quote on site</textarea>
       }
     }
 
+    function getVal(id, fallback = '') {
+      const el = document.getElementById(id);
+      return el && el.value ? el.value.trim() : fallback;
+    }
+
     function getTenantConfig() {
-      const rawServices = document.getElementById('cfgServices').value.split('\n');
+      const rawServices = getVal('cfgServices', 'Blocked Drains: From $150\nBurst Pipe: From $180').split('\n');
       const parsedServices = rawServices
         .map(line => {
           const parts = line.split(':');
@@ -510,16 +550,19 @@ Hot Water Replacement: Quote on site</textarea>
         .filter(s => s.title.length > 0);
 
       return {
-        ownerFirstName: document.getElementById('cfgOwnerName').value.trim(),
-        businessName: document.getElementById('cfgBizName').value.trim(),
-        tradeType: document.getElementById('cfgTradeType').value,
-        emergencyTriageAdvice: document.getElementById('cfgTriage').value.trim(),
+        ownerFirstName: getVal('cfgOwnerName', 'Caleb'),
+        businessName: getVal('cfgBizName', "Caleb's Emergency Plumbing & Gas"),
+        tradeType: getVal('cfgTradeType', 'plumber'),
+        emergencyTriageAdvice: getVal('cfgTriage', 'Advise customer to turn off their main water meter isolation tap.'),
         services: parsedServices,
-        excludedServices: document.getElementById('cfgExcluded').value.split(',').map(s => s.trim()).filter(Boolean),
+        excludedServices: getVal('cfgExcluded', 'Commercial roofing, Solar').split(',').map(s => s.trim()).filter(Boolean),
       };
     }
 
     async function initGreeting() {
+      const config = getTenantConfig();
+      const tradieName = config.ownerFirstName || 'our team lead';
+
       try {
         const res = await fetch('/api/demo/chat', {
           method: 'POST',
@@ -527,19 +570,20 @@ Hot Water Replacement: Quote on site</textarea>
           body: JSON.stringify({
             isMissedCall: true,
             callerId: callerId,
-            tenantConfig: getTenantConfig(),
+            tenantConfig: config,
           }),
         });
         const data = await res.json();
         if (data && data.initialGreeting) {
           addMessage(data.initialGreeting, false);
-        } else {
-          addMessage("Hi, this is Caleb's assistant. He's on the tools right now. How can we help you today?", false);
+          return;
         }
       } catch (err) {
-        console.error('Init greeting error:', err);
-        addMessage("Hi, this is Caleb's assistant. He's on the tools right now. How can we help you today?", false);
+        console.error('Network error during initGreeting:', err);
       }
+
+      // Dynamic fallback matching whichever tradie is currently selected (Liam, Jack, Caleb, etc.)
+      addMessage("Hi, this is " + tradieName + "'s assistant. He's on the tools right now. How can we help you today?", false);
     }
 
     let debounceTimer = null;
@@ -578,6 +622,9 @@ Hot Water Replacement: Quote on site</textarea>
     async function executeEvaluationTurn() {
       if (pendingMessageBuffer.length === 0) return;
       
+      const batch = pendingMessageBuffer.join('\n');
+      pendingMessageBuffer = [];
+
       // Show subtle typing bubble while Gemini processes
       const container = document.getElementById('messagesList');
       const typingEl = document.createElement('div');
@@ -588,27 +635,33 @@ Hot Water Replacement: Quote on site</textarea>
       container.appendChild(typingEl);
       container.scrollTop = container.scrollHeight;
 
-      const res = await fetch('/api/demo/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: pendingMessageBuffer.join('\n'),
-          callerId: callerId,
-          tenantConfig: getTenantConfig(),
-        }),
-      });
-      pendingMessageBuffer = [];
-      const data = await res.json();
-      
-      const el = document.getElementById('typingBubble');
-      if (el) el.remove();
+      try {
+        const res = await fetch('/api/demo/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: batch,
+            callerId: callerId,
+            tenantConfig: getTenantConfig(),
+          }),
+        });
+        const data = await res.json();
+        
+        const el = document.getElementById('typingBubble');
+        if (el) el.remove();
 
-      if (data.reply) {
-        addMessage(data.reply, false);
-      }
+        if (data.reply) {
+          addMessage(data.reply, false);
+        }
 
-      if (data.session) {
-        updateStatusBadge(data.session.status);
+        if (data.session) {
+          updateStatusBadge(data.session.status);
+        }
+      } catch (err) {
+        console.error('Turn evaluation network error:', err);
+        const el = document.getElementById('typingBubble');
+        if (el) el.remove();
+        addMessage("⚠️ Network error: Could not reach assistant. Please check connection.", false);
       }
     }
 
@@ -671,8 +724,14 @@ Hot Water Replacement: Quote on site</textarea>
       await initGreeting();
     }
 
-    // Auto-init on page load
-    initGreeting();
+    // Safe mounting: Wait for full window load (DOM elements + styles + scripts)
+    window.addEventListener('load', () => {
+      const toggleBtn = document.getElementById('btnToggleConfig');
+      if (toggleBtn) {
+        toggleBtn.addEventListener('click', toggleDrawer);
+      }
+      initGreeting();
+    });
   </script>
 </body>
 </html>`;
