@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { Client } from '@upstash/qstash';
+import { MessageBufferManager } from '../core/message-buffer.js';
 import { env } from '../config/env.js';
 
 export interface TwilioSmsWebhookBody {
@@ -21,24 +22,24 @@ export interface InboundMessageQueueEvent {
   messageSid: string;
   callerNumber: string;
   dialedNumber: string;
-  body: string;
-  mediaUrls: string[];
   receivedAt: string;
+  debounceVersion: number;
 }
 
 const EMPTY_TWIML_RESPONSE = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
 
-export function registerTwilioSmsRoutes(app: FastifyInstance) {
+export function registerTwilioSmsRoutes(
+  app: FastifyInstance,
+  bufferManager?: MessageBufferManager
+) {
   const qstash = env.QSTASH_TOKEN ? new Client({ token: env.QSTASH_TOKEN }) : null;
 
   /**
    * INBOUND TWILIO SMS WEBHOOK
    * 
-   * Twilio calls this whenever a customer replies to an SMS.
-   * Directives:
-   * 1. Immediate Acknowledgement: Push event to QStash without blocking on LLM or DB.
-   * 2. Return HTTP 200 with empty TwiML <Response/> immediately.
-   * 3. Collect any MMS MediaUrl parameters to protect Visual Triage.
+   * When a customer replies, buffer the text in Redis and schedule a 10s debounce
+   * trigger via QStash. If the customer sends 3 quick messages in a row, each one
+   * extends the buffer and resets the version token, preventing fragmented replies.
    */
   app.post(
     '/api/webhooks/twilio/sms',
@@ -64,10 +65,22 @@ export function registerTwilioSmsRoutes(app: FastifyInstance) {
         }
       }
 
-      req.log.info(
-        { messageSid, callerNumber, dialedNumber, mediaCount: mediaUrls.length },
-        'Inbound SMS received. Publishing to QStash.'
-      );
+      // ── Step 1: Ingest into Redis Debounce Buffer ───────────────────────
+      const businessId = `tenant_${dialedNumber.replace(/[^0-9]/g, '')}`;
+      let debounceVersion = 1;
+
+      if (bufferManager) {
+        const result = await bufferManager.ingestMessage(businessId, callerNumber, {
+          text: body,
+          mediaUrls,
+          receivedAt: new Date().toISOString(),
+        });
+        debounceVersion = result.version;
+        req.log.info(
+          { callerNumber, version: debounceVersion, totalBuffered: result.totalBuffered },
+          'Customer message ingested into debounce buffer'
+        );
+      }
 
       const queueEvent: InboundMessageQueueEvent = {
         eventType: 'INBOUND_SMS',
@@ -75,38 +88,32 @@ export function registerTwilioSmsRoutes(app: FastifyInstance) {
         messageSid,
         callerNumber,
         dialedNumber,
-        body,
-        mediaUrls,
         receivedAt: new Date().toISOString(),
+        debounceVersion,
       };
 
       const destinationWorkerUrl = `${env.APP_BASE_URL}/api/workers/process-message`;
 
+      // ── Step 2: Schedule delayed evaluation (10-second debounce window) ─
       if (qstash) {
         try {
           await qstash.publishJSON({
             url: destinationWorkerUrl,
             body: queueEvent,
-            deduplicationId: messageSid, // Guarantees carrier duplicate retries are dropped
+            delay: '10s', // Wait 10 seconds for customer to finish typing subsequent texts
           });
-          req.log.info({ messageSid, destinationWorkerUrl }, 'SMS event published to QStash');
+          req.log.info({ messageSid, debounceVersion, delay: '10s' }, 'Scheduled 10s debounced SMS evaluation in QStash');
         } catch (err: any) {
           const errMsg = err?.message || JSON.stringify(err);
           if (errMsg.includes('loopback address') || destinationWorkerUrl.includes('localhost')) {
-            req.log.warn({ destinationWorkerUrl }, '[QStash Local Dev] QStash cloud cannot hit localhost; simulated successful publish');
+            req.log.warn({ destinationWorkerUrl }, '[QStash Local Dev] Simulated successful debounce publish');
           } else {
             req.log.error({ err, messageSid }, 'Failed to publish SMS event to QStash');
             return reply.status(500).send({ error: 'Failed to queue SMS event' });
           }
         }
-      } else {
-        req.log.info(
-          { queueEvent, destinationWorkerUrl, note: 'QSTASH_TOKEN not set; simulated publish' },
-          '[Local Dev] Simulated QStash publish for SMS'
-        );
       }
 
-      // Return empty TwiML with 200 OK immediately
       return reply
         .status(200)
         .header('Content-Type', 'text/xml')

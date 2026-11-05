@@ -4,6 +4,7 @@ import { GeminiQualificationEvaluator } from '../gemini-evaluator.js';
 import { TwilioSmsClient } from '../twilio-client.js';
 import { ServiceM8RestClient } from '../servicem8-client.js';
 import { ITenantProvider } from '../types/tenant.js';
+import { MessageBufferManager } from '../message-buffer.js';
 import { CollectedJobDetails } from '../../contracts/session-state.contract.js';
 import { env } from '../../config/env.js';
 
@@ -18,6 +19,7 @@ export interface ProcessMessagePayload {
   mediaUrls?: string[];
   businessId?: string;
   receivedAt: string;
+  debounceVersion?: number;
 }
 
 function getMissingFields(data: CollectedJobDetails): string[] {
@@ -36,12 +38,13 @@ export async function processMessageEvent(
     twilio: TwilioSmsClient;
     tenantProvider: ITenantProvider;
     servicem8: ServiceM8RestClient;
+    bufferManager?: MessageBufferManager;
     logger?: any;
   }
 ): Promise<{ statusCode: number; data: any }> {
-  const { sessionStore, gemini, twilio, tenantProvider, servicem8 } = deps;
+  const { sessionStore, gemini, twilio, tenantProvider, servicem8, bufferManager } = deps;
   const logger = deps.logger || console;
-  const { callerNumber, dialedNumber, eventType, body = '', mediaUrls = [] } = payload;
+  let { callerNumber, dialedNumber, eventType, body = '', mediaUrls = [], debounceVersion } = payload;
 
   if (!callerNumber || !dialedNumber) {
     logger.warn({ payload }, 'Worker received payload with missing phone numbers');
@@ -67,6 +70,26 @@ export async function processMessageEvent(
   const businessId = payload.businessId || tenant.tenantId;
   const businessName = tenant.businessName;
   const ownerPhone = tenant.publicPhone || env.BUSINESS_OWNER_PHONE;
+
+  // ── DEBOUNCE DRAIN: If triggered with a debounceVersion, drain the buffer ────
+  if (eventType === 'INBOUND_SMS' && debounceVersion !== undefined && bufferManager) {
+    const drained = await bufferManager.drainIfLatest(businessId, callerNumber, debounceVersion);
+    if (!drained) {
+      logger.info(
+        { callerNumber, debounceVersion },
+        'Debounce timer fired, but a newer message arrived or buffer was already consumed. Skipping evaluation.'
+      );
+      return { statusCode: 200, data: { status: 'skipped', reason: 'stale_debounce_version' } };
+    }
+
+    // Replace the single body with the full combined stream from the customer
+    body = drained.combinedText;
+    mediaUrls = drained.combinedMediaUrls;
+    logger.info(
+      { callerNumber, messageCount: drained.messageCount, combinedBody: body },
+      'Drained multi-message burst buffer into single prompt turn'
+    );
+  }
 
   logger.info({ eventType, businessId, businessName, callerNumber }, 'Worker processing message');
 

@@ -10,7 +10,7 @@ import { createInitialSession, SessionStatus } from '../contracts/session-state.
  * - Deterministic, sub-50ms execution
  * - Tests every reachable state, valid transition, and illegal transition guard
  */
-export function runLevel1UnitTests() {
+export async function runLevel1UnitTests() {
   console.log('====================================================');
   console.log('🔬 LEVEL 1: PURE STATE MACHINE UNIT TESTS (δ: Q × Σ → Q\' × Ω)');
   console.log('====================================================\n');
@@ -172,9 +172,46 @@ export function runLevel1UnitTests() {
   assert(postEscMsg.actions.some(a => a.type === 'FORWARD_UNHANDLED_TO_OWNER'), 'Emits action: FORWARD_UNHANDLED_TO_OWNER');
 
   // ─────────────────────────────────────────────────────────────
-  // 6. EXHAUSTIVE TRANSITION MATRIX AUDIT
+  // 6. MULTI-MESSAGE BURST DEBOUNCE TESTS (TEL-05)
   // ─────────────────────────────────────────────────────────────
-  console.log('\n6️⃣ Matrix Coverage Audit: Every declared state is handled');
+  console.log('\n6️⃣ Multi-Message Burst Debounce Buffer (TEL-05)');
+  const { MessageBufferManager } = await import('../core/message-buffer.js');
+  const buffer = new MessageBufferManager(null); // Pure in-memory unit mode
+  const testCaller = '+61499887766';
+  const testBiz = 'biz_test_plumbing';
+
+  // Test 1: First message sets version 1
+  const r1 = await buffer.ingestMessage(testBiz, testCaller, { text: 'hey', receivedAt: '' });
+  assert(r1.version === 1 && r1.totalBuffered === 1, 'First text sets version = 1, totalBuffered = 1');
+
+  // Test 2: Rapid subsequent texts increment versions
+  const r2 = await buffer.ingestMessage(testBiz, testCaller, { text: 'burst pipe under sink', receivedAt: '' });
+  assert(r2.version === 2 && r2.totalBuffered === 2, 'Second text increments version = 2, totalBuffered = 2');
+
+  const r3 = await buffer.ingestMessage(testBiz, testCaller, { text: 'in Glenelg', receivedAt: '' });
+  assert(r3.version === 3 && r3.totalBuffered === 3, 'Third text increments version = 3, totalBuffered = 3');
+
+  // Test 3: Stale debounce timer (version 1) is rejected
+  const staleDrain = await buffer.drainIfLatest(testBiz, testCaller, 1);
+  assert(staleDrain === null, 'Stale timer (version 1) is ignored because version is now 3');
+
+  // Test 4: Latest debounce timer (version 3) successfully drains and joins all messages
+  const latestDrain = await buffer.drainIfLatest(testBiz, testCaller, 3);
+  assert(latestDrain !== null, 'Latest timer (version 3) successfully drains buffer');
+  assert(latestDrain?.messageCount === 3, 'Drained batch contains exactly 3 messages');
+  assert(
+    latestDrain?.combinedText === 'hey\nburst pipe under sink\nin Glenelg',
+    'Combines fragmented messages into single multi-line prompt string'
+  );
+
+  // Test 5: Buffer is completely empty after drain
+  const emptyDrain = await buffer.drainIfLatest(testBiz, testCaller, 3);
+  assert(emptyDrain === null, 'Subsequent drain attempt on consumed buffer returns null');
+
+  // ─────────────────────────────────────────────────────────────
+  // 7. EXHAUSTIVE TRANSITION MATRIX AUDIT
+  // ─────────────────────────────────────────────────────────────
+  console.log('\n7️⃣ Matrix Coverage Audit: Every declared state is handled');
   const allStatuses: SessionStatus[] = [
     'INIT',
     'AWAITING_REPLY',

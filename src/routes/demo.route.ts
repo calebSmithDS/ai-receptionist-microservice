@@ -5,6 +5,7 @@ import { TwilioSmsClient } from '../core/twilio-client.js';
 import { ServiceM8RestClient } from '../core/servicem8-client.js';
 import { CachedTenantProvider } from '../core/providers/cached-tenant.provider.js';
 import { ITenantProvider, TenantContext } from '../core/types/tenant.js';
+import { MessageBufferManager } from '../core/message-buffer.js';
 import { processMessageEvent } from '../core/services/message-dispatcher.js';
 
 interface DemoChatPayload {
@@ -12,6 +13,7 @@ interface DemoChatPayload {
   isMissedCall?: boolean;
   tenantConfig?: Partial<TenantContext>;
   callerId?: string;
+  debounceVersion?: number;
 }
 
 export function registerDemoRoutes(
@@ -20,7 +22,8 @@ export function registerDemoRoutes(
   gemini: GeminiQualificationEvaluator,
   twilio: TwilioSmsClient,
   tenantProvider: CachedTenantProvider,
-  servicem8: ServiceM8RestClient
+  servicem8: ServiceM8RestClient,
+  bufferManager?: MessageBufferManager
 ) {
   // Direct worker function call - bypasses HTTP / light-my-request entirely!
   async function invokeWorkerDirectly(payload: any) {
@@ -30,6 +33,7 @@ export function registerDemoRoutes(
       twilio,
       tenantProvider,
       servicem8,
+      bufferManager,
       logger: app.log,
     });
   }
@@ -43,7 +47,7 @@ export function registerDemoRoutes(
   app.post(
     '/api/demo/chat',
     async (req: FastifyRequest<{ Body: DemoChatPayload }>, reply: FastifyReply) => {
-      const { message = '', isMissedCall = false, tenantConfig, callerId = '+61499112233' } = req.body;
+      const { message = '', isMissedCall = false, tenantConfig, callerId = '+61499112233', debounceVersion } = req.body;
       const dialedNumber = '+17372508034';
       const businessId = tenantConfig?.tenantId || 'tenant_caleb_plumbing';
 
@@ -98,7 +102,9 @@ export function registerDemoRoutes(
       }
 
       // Customer sends an SMS message
-      await invokeWorkerDirectly({
+      // If debounceVersion is provided, drain and evaluate buffer.
+      // Otherwise evaluate this message directly.
+      const result = await invokeWorkerDirectly({
         eventType: 'INBOUND_SMS',
         channel: 'twilio_sms',
         callerNumber: callerId,
@@ -106,7 +112,13 @@ export function registerDemoRoutes(
         businessId,
         body: message,
         receivedAt: new Date().toISOString(),
+        debounceVersion,
       });
+
+      // If skipped because a newer message arrived in the buffer, return skipped status
+      if (result?.data?.status === 'skipped') {
+        return reply.send({ success: true, skipped: true });
+      }
 
       const session = await sessionStore.getSession(businessId, callerId);
       const lastReply = session?.history[session.history.length - 1];
@@ -397,12 +409,20 @@ function getDemoHtml(): string {
 
       <div class="form-group">
         <label>Trade Specialty (Ontology)</label>
-        <select class="form-control" id="cfgTradeType">
+        <select class="form-control" id="cfgTradeType" onchange="handleTradeChange()">
           <option value="plumber" selected>Plumber & Gas Fitter</option>
           <option value="electrician">Electrician</option>
+          <option value="hvac">Air Conditioning & Refrigeration (HVAC)</option>
           <option value="locksmith">Locksmith</option>
           <option value="roofer">Roofer</option>
         </select>
+      </div>
+
+      <div class="form-group">
+        <label>Services & Starting Prices (One per line: Service: Price)</label>
+        <textarea class="form-control" id="cfgServices" rows="3">Blocked Drains: From $150
+Burst Pipe Repair: From $180 call-out
+Hot Water Replacement: Quote on site</textarea>
       </div>
 
       <div class="form-group">
@@ -412,7 +432,7 @@ function getDemoHtml(): string {
 
       <div class="form-group">
         <label>Excluded Work (Blacklist)</label>
-        <input type="text" class="form-control" id="cfgExcluded" value="Commercial roofing, Solar hot water, New construction" />
+        <input type="text" class="form-control" id="cfgExcluded" value="Commercial roofing, Solar hot water panels, New construction" />
       </div>
 
       <button class="btn-apply" onclick="applySettingsAndRestart()">Apply & Start New Chat</button>
@@ -436,12 +456,65 @@ function getDemoHtml(): string {
       container.scrollTop = container.scrollHeight;
     }
 
+    function handleTradeChange() {
+      const trade = document.getElementById('cfgTradeType').value;
+      const ownerInput = document.getElementById('cfgOwnerName');
+      const bizInput = document.getElementById('cfgBizName');
+      const servicesInput = document.getElementById('cfgServices');
+      const triageInput = document.getElementById('cfgTriage');
+      const excludedInput = document.getElementById('cfgExcluded');
+
+      if (trade === 'hvac') {
+        ownerInput.value = 'Liam';
+        bizInput.value = "Liam's Air Conditioning & Heating";
+        servicesInput.value = "Split System Service / Regas: From $180\nDucted AC Breakdown Diagnostic: From $220\nNew Split System Supply & Install: From $1,650\nEvaporative Cooler Repair: From $195";
+        triageInput.value = "If your AC unit is leaking water into light fixtures, turn off the AC isolation switch on your switchboard immediately.";
+        excludedInput.value = "Commercial ammonia refrigeration, Automotive AC repairs, Plumbing drain snaking";
+      } else if (trade === 'electrician') {
+        ownerInput.value = 'Jack';
+        bizInput.value = "Volt Pro Electrical & Solar";
+        servicesInput.value = "Emergency Switchboard Callout: From $220\nSafety Switch Tripping Fault-Find: From $150\nPowerpoint & Light Installation: From $120\nEV Charger Install: From $850";
+        triageInput.value = "If you smell burning plastic or see sparking, turn off the main switch immediately. For life hazards, contact 000.";
+        excludedInput.value = "Plumbing, Roofing, Painting";
+      } else if (trade === 'locksmith') {
+        ownerInput.value = 'Marcus';
+        bizInput.value = "Adelaide Rapid Locksmiths";
+        servicesInput.value = "Emergency Lockout Gain Entry: From $140\nDeadbolt Installation: From $180\nLock Rekey / Key Cutting: From $95\nDigital Smart Lock Install: From $250";
+        triageInput.value = "If you are locked out in an unsafe area or with a young child inside, please call 000 immediately.";
+        excludedInput.value = "Automotive ignition programming, Safe cracking";
+      } else if (trade === 'roofer') {
+        ownerInput.value = 'Mick';
+        bizInput.value = "Top Notch Roofing & Gutters";
+        servicesInput.value = "Emergency Roof Leak Callout: From $250\nGutter Cleaning & Flush: From $180\nTile Replacement & Valley Repair: Quote on site\nRe-bedding & Pointing: Quote on site";
+        triageInput.value = "Do not climb onto the roof during active rain or storms. Place buckets under active ceiling leaks.";
+        excludedInput.value = "Electrical rewiring, Gas repairs";
+      } else {
+        ownerInput.value = 'Caleb';
+        bizInput.value = "Caleb's Emergency Plumbing & Gas";
+        servicesInput.value = "Blocked Drains: From $150\nBurst Pipe Repair: From $180 call-out\nHot Water Replacement: Quote on site";
+        triageInput.value = "Advise customer to locate and turn off their main water meter isolation tap at the front of the house.";
+        excludedInput.value = "Commercial roofing, Solar hot water panels, New construction";
+      }
+    }
+
     function getTenantConfig() {
+      const rawServices = document.getElementById('cfgServices').value.split('\n');
+      const parsedServices = rawServices
+        .map(line => {
+          const parts = line.split(':');
+          if (parts.length >= 2) {
+            return { title: parts[0].trim(), startingPrice: parts.slice(1).join(':').trim() };
+          }
+          return { title: line.trim() };
+        })
+        .filter(s => s.title.length > 0);
+
       return {
         ownerFirstName: document.getElementById('cfgOwnerName').value.trim(),
         businessName: document.getElementById('cfgBizName').value.trim(),
         tradeType: document.getElementById('cfgTradeType').value,
         emergencyTriageAdvice: document.getElementById('cfgTriage').value.trim(),
+        services: parsedServices,
         excludedServices: document.getElementById('cfgExcluded').value.split(',').map(s => s.trim()).filter(Boolean),
       };
     }
@@ -462,24 +535,66 @@ function getDemoHtml(): string {
       }
     }
 
-    async function sendMessage() {
-      const input = document.getElementById('messageInput');
-      const text = input.value.trim();
-      if (!text) return;
+    let debounceTimer = null;
+    let debounceCountdown = 10;
+    let countdownInterval = null;
 
-      addMessage(text, true);
-      input.value = '';
+    function updateDebounceBanner(count) {
+      let banner = document.getElementById('debounceNotice');
+      if (count > 0) {
+        if (!banner) {
+          banner = document.createElement('div');
+          banner.id = 'debounceNotice';
+          banner.className = 'msg-notice';
+          document.getElementById('messagesList').appendChild(banner);
+        }
+        banner.innerHTML = '💬 <i>Waiting for you to finish typing... (' + count + 's)</i> <button onclick="triggerImmediateEvaluation()" style="background:#238636; border:none; color:#fff; border-radius:6px; padding:2px 8px; font-size:11px; margin-left:6px; cursor:pointer;">Send Now ⚡</button>';
+        document.getElementById('messagesList').scrollTop = document.getElementById('messagesList').scrollHeight;
+      } else if (banner) {
+        banner.remove();
+      }
+    }
+
+    async function triggerImmediateEvaluation() {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+      }
+      updateDebounceBanner(0);
+      await executeEvaluationTurn();
+    }
+
+    async function executeEvaluationTurn() {
+      if (pendingMessageBuffer.length === 0) return;
+      
+      // Show subtle typing bubble while Gemini processes
+      const container = document.getElementById('messagesList');
+      const typingEl = document.createElement('div');
+      typingEl.id = 'typingBubble';
+      typingEl.className = 'msg msg-bot';
+      typingEl.style.opacity = '0.7';
+      typingEl.innerText = 'typing...';
+      container.appendChild(typingEl);
+      container.scrollTop = container.scrollHeight;
 
       const res = await fetch('/api/demo/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: text,
+          message: pendingMessageBuffer.join('\\n'),
           callerId: callerId,
           tenantConfig: getTenantConfig(),
         }),
       });
+      pendingMessageBuffer = [];
       const data = await res.json();
+      
+      const el = document.getElementById('typingBubble');
+      if (el) el.remove();
 
       if (data.reply) {
         addMessage(data.reply, false);
@@ -488,6 +603,40 @@ function getDemoHtml(): string {
       if (data.session) {
         updateStatusBadge(data.session.status);
       }
+    }
+
+    let pendingMessageBuffer = [];
+
+    async function sendMessage() {
+      const input = document.getElementById('messageInput');
+      const text = input.value.trim();
+      if (!text) return;
+
+      addMessage(text, true);
+      pendingMessageBuffer.push(text);
+      input.value = '';
+
+      // Reset debounce timer on every new message!
+      if (debounceTimer) clearTimeout(debounceTimer);
+      if (countdownInterval) clearInterval(countdownInterval);
+
+      debounceCountdown = 10;
+      updateDebounceBanner(debounceCountdown);
+
+      countdownInterval = setInterval(() => {
+        debounceCountdown--;
+        if (debounceCountdown > 0) {
+          updateDebounceBanner(debounceCountdown);
+        } else {
+          clearInterval(countdownInterval);
+          countdownInterval = null;
+        }
+      }, 1000);
+
+      debounceTimer = setTimeout(async () => {
+        updateDebounceBanner(0);
+        await executeEvaluationTurn();
+      }, 10000);
     }
 
     function updateStatusBadge(status) {

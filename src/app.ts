@@ -10,6 +10,7 @@ import { TwilioSmsClient } from './core/twilio-client.js';
 import { ServiceM8RestClient } from './core/servicem8-client.js';
 import { SanityTenantProvider } from './core/providers/sanity-tenant.provider.js';
 import { CachedTenantProvider } from './core/providers/cached-tenant.provider.js';
+import { MessageBufferManager } from './core/message-buffer.js';
 import { Redis } from '@upstash/redis';
 import { env } from './config/env.js';
 
@@ -47,6 +48,14 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   // Fastify plugin to parse application/x-www-form-urlencoded payloads from Twilio webhooks
   await app.register(formbody);
 
+  // Multi-tenant configuration: Sanity CMS wrapped with Upstash Redis 1-hour caching
+  const redis = env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN
+    ? new Redis({ url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN })
+    : null;
+
+  // Distributed Message Burst Buffer (Debouncing multi-message SMS streams)
+  const bufferManager = new MessageBufferManager(redis);
+
   // Health check endpoint
   app.get('/health', async () => ({
     status: 'ok',
@@ -57,19 +66,14 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   // Twilio Voice Webhooks
   registerTwilioVoiceRoutes(app);
 
-  // Twilio SMS Webhooks
-  registerTwilioSmsRoutes(app);
+  // Twilio SMS Webhooks (with debounce buffer)
+  registerTwilioSmsRoutes(app, bufferManager);
 
   // Initialize Core Services for Worker
   const sessionStore = options.sessionStore || new SessionStore();
   const geminiEvaluator = new GeminiQualificationEvaluator();
   const twilioClient = new TwilioSmsClient();
   const servicem8Client = new ServiceM8RestClient();
-
-  // Multi-tenant configuration: Sanity CMS wrapped with Upstash Redis 1-hour caching
-  const redis = env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN
-    ? new Redis({ url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN })
-    : null;
 
   const sanityProvider = new SanityTenantProvider({
     projectId: env.SANITY_PROJECT_ID,
@@ -100,7 +104,8 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     geminiEvaluator,
     twilioClient,
     cachedTenantProvider,
-    servicem8Client
+    servicem8Client,
+    bufferManager
   );
 
   return app;

@@ -327,6 +327,69 @@ async function runLevel2ScenarioTests() {
   );
 
   // ─────────────────────────────────────────────────────────────────
+  // SCENARIO 8: Multi-Message Debounce Buffer (TEL-05)
+  // ─────────────────────────────────────────────────────────────────
+  console.log('\n8️⃣ Scenario 8: Multi-Message Burst Debouncing (TEL-05)');
+  const caller8 = '+61499000008';
+  sentMessages.length = 0;
+
+  // 1. Initial missed call
+  await dispatchWorker({ eventType: 'MISSED_CALL', callerNumber: caller8 });
+  sentMessages.length = 0;
+
+  const { MessageBufferManager } = await import('../core/message-buffer.js');
+  const testBuffer = new MessageBufferManager(null); // in-memory test buffer
+
+  // 2. Customer sends 3 rapid fragmented texts
+  const ingest1 = await testBuffer.ingestMessage(mockTenant.tenantId, caller8, {
+    text: 'hey',
+    receivedAt: new Date().toISOString(),
+  });
+  const ingest2 = await testBuffer.ingestMessage(mockTenant.tenantId, caller8, {
+    text: 'I have a burst pipe in my backyard',
+    receivedAt: new Date().toISOString(),
+  });
+  const ingest3 = await testBuffer.ingestMessage(mockTenant.tenantId, caller8, {
+    text: 'I live in Glenelg',
+    receivedAt: new Date().toISOString(),
+  });
+
+  assert(ingest1.version === 1, 'TEL-05: Ingest 1 sets version 1');
+  assert(ingest2.version === 2, 'TEL-05: Ingest 2 increments version to 2');
+  assert(ingest3.version === 3, 'TEL-05: Ingest 3 increments version to 3');
+  assert(ingest3.totalBuffered === 3, 'TEL-05: Buffer contains all 3 messages');
+
+  // 3. Stale timer (version 1) fires while version 3 is in Redis -> should skip!
+  const staleDrain = await testBuffer.drainIfLatest(mockTenant.tenantId, caller8, 1);
+  assert(staleDrain === null, 'TEL-05: Stale debounce timer (version 1) returns null and is ignored');
+
+  // 4. Latest timer (version 3) fires -> should drain all 3 combined!
+  const latestDrain = await testBuffer.drainIfLatest(mockTenant.tenantId, caller8, 3);
+  assert(latestDrain !== null, 'TEL-05: Latest debounce timer (version 3) drains successfully');
+  assert(latestDrain?.messageCount === 3, 'TEL-05: Drains all 3 accumulated messages');
+  assert(
+    !!latestDrain &&
+    latestDrain.combinedText.includes('hey') &&
+    latestDrain.combinedText.includes('burst pipe') &&
+    latestDrain.combinedText.includes('Glenelg'),
+    'TEL-05: Concatenates all messages into a unified multi-line string'
+  );
+
+  // 5. Worker receives combined text as a single turn
+  sentMessages.length = 0;
+  const s8WorkerRes = await dispatchWorker({
+    eventType: 'INBOUND_SMS',
+    callerNumber: caller8,
+    body: latestDrain!.combinedText,
+  });
+
+  const s8Session = await sessionStore.getSession(mockTenant.tenantId, caller8);
+  assert(s8Session?.status === 'QUALIFYING', 'TEL-05: Single evaluation turn transitions to QUALIFYING', `Status: ${s8Session?.status}, worker code: ${s8WorkerRes.statusCode}, body: ${s8WorkerRes.body}`);
+  assert(!!s8Session?.collectedData.issue, 'TEL-05: Extracted issue from combined stream', `Issue: ${s8Session?.collectedData.issue}`);
+  assert(!!s8Session?.collectedData.suburb, 'TEL-05: Extracted suburb from combined stream', `Suburb: ${s8Session?.collectedData.suburb}`);
+  assert(sentMessages.length === 1, 'TEL-05: Dispatched exactly ONE combined SMS reply instead of 3 fragmented replies', `sentCount: ${sentMessages.length}`);
+
+  // ─────────────────────────────────────────────────────────────────
   // SUMMARY
   // ─────────────────────────────────────────────────────────────────
   console.log('\n====================================================');
