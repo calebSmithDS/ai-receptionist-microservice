@@ -131,10 +131,12 @@ export function registerDemoRoutes(
 
       const session = await sessionStore.getSession(businessId, callerId);
       const lastReply = session?.history[session.history.length - 1];
+      const isForwardedToOwner = result?.data?.forwarded === true;
 
       return reply.send({
         success: true,
         session,
+        forwardedToOwner: isForwardedToOwner,
         reply: lastReply?.role === 'assistant' ? lastReply.content : null,
       });
     }
@@ -621,6 +623,16 @@ Hot Water Replacement: Quote on site</textarea>
 
       if (data.reply) {
         addMessage(data.reply, false);
+      } else if (data.forwardedToOwner) {
+        const ownerName = getTenantConfig().ownerFirstName || 'the tradie';
+        const noticeEl = document.createElement('div');
+        noticeEl.className = 'msg-notice';
+        noticeEl.style.background = 'rgba(56, 139, 253, 0.15)';
+        noticeEl.style.borderColor = '#388bfd';
+        noticeEl.style.color = '#58a6ff';
+        noticeEl.innerHTML = '📲 <b>Forwarded to ' + ownerName + '</b><br><span style="font-size:10px; color:#8b949e;">Lead already qualified. Follow-up forwarded to ' + ownerName + ' to answer directly.</span>';
+        document.getElementById('messagesList').appendChild(noticeEl);
+        scrollToBottom(true);
       }
 
       if (data.session) {

@@ -101,7 +101,7 @@ export class GeminiQualificationEvaluator {
           completionMessage: {
             type: Type.STRING,
             description:
-              'Closing SMS when isFullyQualified is true. Personalise with their name and issue. Give any tenant-specific safety advice if urgency is HIGH or EMERGENCY.',
+              'Closing SMS when isFullyQualified is true. Warm, authentic Aussie tradie receptionist tone. Thank them by name, confirm the tradie will call shortly to arrange a time to inspect/take a look on-site and provide an upfront quote. DO NOT promise an immediate fix or say "get it sorted" (as on-site assessment/quoting is required first). Give any tenant-specific safety advice if urgency is HIGH or EMERGENCY.',
           },
           isEscalated: {
             type: Type.BOOLEAN,
@@ -192,13 +192,20 @@ hazard in water, sparking wires, carbon monoxide, structural collapse:
 
 ${tenantTriageSection}
 
-RULE 4 — PRICING & DIAGNOSIS GUARDRAIL:
-You MUST NOT estimate any price, diagnose a root cause, or guarantee a technical outcome.
-If a customer asks "how much will it cost?" or "what do you think the problem is?":
-  Step 1: Acknowledge — "Totally understand, you want a rough idea."
-  Step 2: State policy — "Caleb gives an upfront quote once he can see it on-site."
-  Step 3: Redirect — pivot back to collecting whichever field is most urgently missing.
-Never say anything that could be interpreted as a binding commitment on pricing.
+RULE 4 — PRICING & DIAGNOSIS GUARDRAIL & COMPLETION POLICY:
+(a) PRICING & DIAGNOSIS:
+    You MUST NOT estimate any price, diagnose a root cause, or guarantee a technical outcome.
+    If a customer asks "how much will it cost?" or "what do you think the problem is?":
+      Step 1: Acknowledge — "Totally understand, you want a rough idea."
+      Step 2: State policy — "${tradieName} provides an upfront quote once he can see it on-site."
+      Step 3: Redirect — pivot back to collecting whichever field is most urgently missing.
+    Never say anything that could be interpreted as a binding commitment on pricing.
+(b) COMPLETION PHRASING (NO OVERPROMISES):
+    When isFullyQualified is true, ALWAYS frame the next step as ${tradieName} giving them a call
+    to arrange a time to come out, inspect/take a look, and provide an upfront quote.
+    DO NOT say "we'll get it sorted" or promise that the issue will be repaired immediately on arrival,
+    because every job requires an on-site assessment first. Example:
+    "Thanks [Name]! I've passed your details to ${tradieName}. He'll give you a buzz shortly to arrange a time to take a look and give you an upfront quote."
 
 RULE 5 — NATURAL QUALIFICATION (no interrogation):
 Collect: (1) customer name, (2) suburb, (3) issue description, (4) urgency.
