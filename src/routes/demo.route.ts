@@ -25,12 +25,21 @@ export function registerDemoRoutes(
   servicem8: ServiceM8RestClient,
   bufferManager?: MessageBufferManager
 ) {
+  // Demo Sandbox Mock: Intercepts and silences outbound Twilio SMS calls during web demo sessions
+  // so external users playing with the demo don't incur Twilio balance charges or trigger alerts to the business owner
+  const demoTwilioClient: TwilioSmsClient = {
+    sendSms: async (params: { from: string; to: string; body: string }) => {
+      app.log.info({ mockSms: params }, '[Demo Sandbox] Intercepted outbound SMS (Simulated $0 dispatch)');
+      return { success: true, messageSid: 'SIMULATED_DEMO_' + Date.now() };
+    },
+  } as unknown as TwilioSmsClient;
+
   // Direct worker function call - bypasses HTTP / light-my-request entirely!
   async function invokeWorkerDirectly(payload: any) {
     return processMessageEvent(payload, {
       sessionStore,
       gemini,
-      twilio,
+      twilio: demoTwilioClient,
       tenantProvider,
       servicem8,
       bufferManager,
@@ -226,8 +235,13 @@ function getDemoHtml(): string {
     /* Chat stream */
     .messages-container {
       flex: 1;
+      min-height: 0;
       padding: 16px;
       overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-y: contain;
+      scroll-behavior: smooth;
       display: flex;
       flex-direction: column;
       gap: 10px;
@@ -445,13 +459,24 @@ Hot Water Replacement: Quote on site</textarea>
       document.getElementById('configDrawer').classList.toggle('open');
     }
 
+    function scrollToBottom(smooth = true) {
+      const container = document.getElementById('messagesList');
+      if (!container) return;
+      requestAnimationFrame(() => {
+        container.scrollTo({
+          top: container.scrollHeight,
+          behavior: smooth ? 'smooth' : 'auto'
+        });
+      });
+    }
+
     function addMessage(text, isUser = false) {
       const container = document.getElementById('messagesList');
       const div = document.createElement('div');
       div.className = 'msg ' + (isUser ? 'msg-user' : 'msg-bot');
       div.innerText = text;
       container.appendChild(div);
-      container.scrollTop = container.scrollHeight;
+      scrollToBottom(true);
     }
 
     function handleTradeChange() {
@@ -547,7 +572,7 @@ Hot Water Replacement: Quote on site</textarea>
           document.getElementById('messagesList').appendChild(banner);
         }
         banner.innerHTML = '💬 <i>Waiting for you to finish typing... (' + count + 's)</i> <button onclick="triggerImmediateEvaluation()" style="background:#238636; border:none; color:#fff; border-radius:6px; padding:2px 8px; font-size:11px; margin-left:6px; cursor:pointer;">Send Now ⚡</button>';
-        document.getElementById('messagesList').scrollTop = document.getElementById('messagesList').scrollHeight;
+        scrollToBottom(true);
       } else if (banner) {
         banner.remove();
       }
@@ -577,7 +602,7 @@ Hot Water Replacement: Quote on site</textarea>
       typingEl.style.opacity = '0.7';
       typingEl.innerText = 'typing...';
       container.appendChild(typingEl);
-      container.scrollTop = container.scrollHeight;
+      scrollToBottom(true);
 
       const res = await fetch('/api/demo/chat', {
         method: 'POST',
