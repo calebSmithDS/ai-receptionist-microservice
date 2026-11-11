@@ -5,6 +5,8 @@ import { TwilioSmsClient } from '../twilio-client.js';
 import { ServiceM8RestClient } from '../servicem8-client.js';
 import { ITenantProvider } from '../types/tenant.js';
 import { MessageBufferManager } from '../message-buffer.js';
+import { EligibilityEngine } from '../eligibility/eligibility-engine.js';
+import { GeminiBouncerClassifier } from '../eligibility/gemini-bouncer.js';
 import { CollectedJobDetails } from '../../contracts/session-state.contract.js';
 import { env } from '../../config/env.js';
 
@@ -39,10 +41,12 @@ export async function processMessageEvent(
     tenantProvider: ITenantProvider;
     servicem8: ServiceM8RestClient;
     bufferManager?: MessageBufferManager;
+    eligibilityEngine?: EligibilityEngine;
+    bouncerClassifier?: GeminiBouncerClassifier;
     logger?: any;
   }
 ): Promise<{ statusCode: number; data: any }> {
-  const { sessionStore, gemini, twilio, tenantProvider, servicem8, bufferManager } = deps;
+  const { sessionStore, gemini, twilio, tenantProvider, servicem8, bufferManager, eligibilityEngine, bouncerClassifier } = deps;
   const logger = deps.logger || console;
   let { callerNumber, dialedNumber, eventType, body = '', mediaUrls = [], debounceVersion } = payload;
 
@@ -110,8 +114,37 @@ export async function processMessageEvent(
     return { statusCode: 200, data: { status: 'ABANDONED', dropped: true } };
   }
 
-  // Case A: MISSED CALL
+  // Case A: MISSED CALL (Integrated with Allium Pre-Flight Eligibility Engine)
   if (eventType === 'MISSED_CALL') {
+    // 1. Run deterministic eligibility check before touching FSM or sending SMS
+    if (eligibilityEngine) {
+      const decision = await eligibilityEngine.evaluateMissedCall(businessId, callerNumber);
+      logger.info({ callerNumber, action: decision.action, reason: decision.reason }, 'Eligibility engine evaluated missed call');
+
+      // Outcome 1: SUPPRESS ($0 gate)
+      if (decision.action === 'suppress') {
+        logger.info({ callerNumber, reason: decision.reason }, 'Missed call text-back suppressed by eligibility engine');
+        return { statusCode: 200, data: { status: 'suppressed', reason: decision.reason } };
+      }
+
+      // Outcome 2: NEUTRAL_SMS (Uncertain relationship / single first-name contact)
+      if (decision.action === 'neutral_sms') {
+        const neutralText = "Hey mate, missed your call, what's up?";
+        await twilio.sendSms({ from: dialedNumber, to: callerNumber, body: neutralText });
+
+        session.history.push({
+          role: 'assistant',
+          content: neutralText,
+          channel: 'twilio_sms',
+          timestamp: new Date().toISOString(),
+        });
+        await sessionStore.saveSession(session);
+        logger.info({ callerNumber }, 'Dispatched neutral SMS to uncertain contact');
+        return { statusCode: 200, data: { status: 'neutral_sms_dispatched', reason: decision.reason } };
+      }
+    }
+
+    // Outcome 3: STANDARD_SMS (Standard qualification flow)
     const transitionResult = transition(session, { type: 'DISPATCH_GREETING' });
 
     if (!transitionResult.isTransitionValid) {
@@ -205,7 +238,7 @@ export async function processMessageEvent(
 
       const ultimatumResult = transition(currentSession, { type: 'ULTIMATUM_SENT', missingFields: missing });
       await sessionStore.saveSession(ultimatumResult.nextState);
-      return { statusCode: 200, data: { status: ultimatumResult.nextState.status, antiLoop: 'ultimatum' } };
+      return { statusCode: 200, data: { status: ultimatumResult.nextState.status, antiLoop: 'ultimatum', ultimatumSent: true } };
     }
 
     if (currentStallCount >= 4) {

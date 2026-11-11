@@ -39,6 +39,9 @@ const envSchema = z.object({
   // ServiceM8 CRM (optional — simulation mode when absent)
   SERVICEM8_EMAIL: z.string().email().optional(),
   SERVICEM8_API_KEY: z.string().optional(),
+
+  // PostgreSQL Database (Neon Serverless for Eligibility Engine & Contacts)
+  DATABASE_URL: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);

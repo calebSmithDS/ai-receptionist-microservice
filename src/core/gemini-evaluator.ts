@@ -348,6 +348,15 @@ Previously collected: ${JSON.stringify(input.previouslyCollected)}
         };
       }
 
+      if (textLower.includes('how much') || textLower.includes('cost') || textLower.includes('price') || textLower.includes('charge') || textLower.includes('ballpark')) {
+        return {
+          intent: 'customer_lead',
+          isFullyQualified: false,
+          extracted: {},
+          replyText: `Totally understand you want a rough idea. ${tradieName} provides an upfront quote once he can see it on-site to inspect the job properly. What suburb are you located in?`,
+        };
+      }
+
       if (textLower.includes('human') || textLower.includes('angry') || textLower.includes('furious')) {
         return {
           intent: 'customer_lead',
@@ -359,24 +368,29 @@ Previously collected: ${JSON.stringify(input.previouslyCollected)}
         };
       }
 
-      const hasSuburb = /maroubra|coogee|bondi|clovelly|rose park|glenelg/.test(textLower);
-      const hasIssue = /drain|pipe|leak|flood|burst|tap|hot water|gas/.test(textLower);
-      const hasUrgency = /urgent|emergency|overflow|flood|right now|burst/.test(textLower);
-      const nameMatch = textLower.match(/(?:name is|i'm|i am|call me)\s+([a-z]+)/i);
+      const textCombined = (input.latestMessage + ' ' + input.history.map((h) => h.content).join(' ')).toLowerCase();
+      const hasSuburb = /maroubra|coogee|bondi|clovelly|rose park|glenelg/.test(textCombined);
+      const hasIssue = /drain|pipe|leak|flood|burst|tap|hot water|gas/.test(textCombined);
+      const hasUrgency = /urgent|emergency|overflow|flood|right now|burst/.test(textCombined);
+      const nameMatch = textCombined.match(/(?:name is|i'm|i am|call me)\s+([a-z]+)/i);
       const customerName = nameMatch
         ? nameMatch[1].charAt(0).toUpperCase() + nameMatch[1].slice(1)
         : undefined;
 
       const isFullyQualified = !!(hasSuburb && hasIssue && hasUrgency && customerName);
 
+      // Distinguish current turn progress: if latest message contains no meaningful job details, don't re-extract previous details
+      const latestLower = input.latestMessage.toLowerCase();
+      const latestHasInfo = /maroubra|coogee|bondi|clovelly|rose park|glenelg|drain|pipe|leak|flood|burst|tap|hot water|gas|urgent|emergency|overflow|right now|name is|i'm|i am|call me/.test(latestLower);
+
       return {
         intent: 'customer_lead',
         isFullyQualified,
         extracted: {
-          suburb: hasSuburb ? 'Maroubra' : undefined,
-          issue: hasIssue ? 'Plumbing issue' : undefined,
-          urgency: hasUrgency ? 'HIGH' : undefined,
-          customerName,
+          suburb: latestHasInfo && hasSuburb ? 'Maroubra' : undefined,
+          issue: latestHasInfo && hasIssue ? 'Plumbing issue' : undefined,
+          urgency: latestHasInfo && hasUrgency ? 'HIGH' : undefined,
+          customerName: latestHasInfo ? customerName : undefined,
           intent: 'customer_lead',
         },
         replyText: isFullyQualified

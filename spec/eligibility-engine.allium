@@ -1,0 +1,221 @@
+-- allium: 3
+-- System Intent: Missed-Call Messaging Eligibility & Bouncer Classification Engine
+-- Architecture: Deterministic Pre-Flight Gatekeeper + Contact Hygiene + Gemini Bouncer Classifier + 1-Tap Mute
+
+--------------------------------------------------------------------------------
+-- 1. ENTITIES & LIFECYCLES
+--------------------------------------------------------------------------------
+
+entity ContactProfile {
+  business_id: String
+  phone_number: String
+  category: unknown_caller | single_first_name | commercial_contact | explicit_excluded | opted_out
+  display_name: String
+  is_muted: Boolean
+  last_interaction_at: Timestamp
+  last_missed_call_at: Timestamp
+  created_at: Timestamp
+
+  transitions category {
+    unknown_caller -> single_first_name
+    unknown_caller -> commercial_contact
+    unknown_caller -> explicit_excluded
+    unknown_caller -> opted_out
+    single_first_name -> explicit_excluded
+    single_first_name -> opted_out
+    commercial_contact -> explicit_excluded
+    commercial_contact -> opted_out
+    terminal: explicit_excluded, opted_out
+  }
+
+  invariant MutedIfExplicitlyExcluded {
+    if this.category in {explicit_excluded, opted_out} then
+      this.is_muted = true
+  }
+}
+
+entity IntentSession {
+  business_id: String
+  caller_phone: String
+  status: awaiting_intent | resolved_personal | resolved_service | expired
+  neutral_sms_sent_at: Timestamp
+  incoming_reply_text: String when status in {resolved_personal, resolved_service}
+  classification_result: personal | service when status in {resolved_personal, resolved_service}
+
+  transitions status {
+    awaiting_intent -> resolved_personal
+    awaiting_intent -> resolved_service
+    awaiting_intent -> expired
+    terminal: resolved_personal, resolved_service, expired
+  }
+
+  invariant AwaitingIntentHasTimestamp {
+    this.neutral_sms_sent_at != null
+  }
+}
+
+entity MuteMagicLink {
+  token: String
+  business_id: String
+  target_phone: String
+  is_redeemed: Boolean
+  created_at: Timestamp
+
+  invariant NonEmptyToken {
+    this.token.length >= 8
+  }
+}
+
+entity EligibilityDecision {
+  business_id: String
+  caller_phone: String
+  action: standard_sms | neutral_sms | suppress
+  reason: 
+    personal_exclusion |
+    opted_out |
+    duplicate_call_window |
+    recent_sms_window |
+    recent_callback_detected |
+    known_contact_uncertain |
+    unknown_caller
+  evaluated_at: Timestamp
+}
+
+--------------------------------------------------------------------------------
+-- 2. DETERMINISTIC ELIGIBILITY RULES (PRE-FLIGHT GATEWAY)
+--------------------------------------------------------------------------------
+
+rule SuppressMutedOrOptedOutCaller {
+  when: MissedCallReceived(business_id, caller_phone)
+  requires: 
+    contact.is_muted = true or contact.category in {explicit_excluded, opted_out}
+  ensures:
+    EligibilityDecision.action = suppress
+    EligibilityDecision.reason = "personal_exclusion"
+    OutboundSMS.count = 0  -- $0 cost gate
+}
+
+rule SuppressDuplicateMissedCallWithin15Minutes {
+  when: MissedCallReceived(business_id, caller_phone)
+  requires:
+    contact.last_missed_call_at != null and
+    (now - contact.last_missed_call_at) < 15m
+  ensures:
+    EligibilityDecision.action = suppress
+    EligibilityDecision.reason = "duplicate_call_window"
+    OutboundSMS.count = 0
+}
+
+rule SuppressRecentSmsInteractionWithin4Hours {
+  when: MissedCallReceived(business_id, caller_phone)
+  requires:
+    contact.last_interaction_at != null and
+    (now - contact.last_interaction_at) < 4h
+  ensures:
+    EligibilityDecision.action = suppress
+    EligibilityDecision.reason = "recent_sms_window"
+    OutboundSMS.count = 0
+}
+
+rule DispatchNeutralSmsForUncertainContact {
+  when: MissedCallReceived(business_id, caller_phone)
+  requires:
+    contact.is_muted = false and
+    contact.category in {single_first_name, commercial_contact} and
+    (now - contact.last_missed_call_at) >= 15m and
+    (contact.last_interaction_at == null or (now - contact.last_interaction_at) >= 4h)
+  ensures:
+    EligibilityDecision.action = neutral_sms
+    EligibilityDecision.reason = "known_contact_uncertain"
+    SMS.sent(to: caller_phone, body: "Hey mate, missed your call, what's up?")
+    IntentSession.status = awaiting_intent
+    IntentSession.caller_phone = caller_phone
+    IntentSession.neutral_sms_sent_at = now
+}
+
+rule DispatchStandardSmsForUnknownCaller {
+  when: MissedCallReceived(business_id, caller_phone)
+  requires:
+    contact.is_muted = false and
+    contact.category = unknown_caller and
+    (contact.last_missed_call_at == null or (now - contact.last_missed_call_at) >= 15m) and
+    (contact.last_interaction_at == null or (now - contact.last_interaction_at) >= 4h)
+  ensures:
+    EligibilityDecision.action = standard_sms
+    EligibilityDecision.reason = "unknown_caller"
+    AIReceptionist.start_qualification(business_id, caller_phone)
+}
+
+--------------------------------------------------------------------------------
+-- 3. THE BOUNCER CLASSIFIER (RESOLVING AWAITING_INTENT VIA DEBOUNCER)
+--------------------------------------------------------------------------------
+
+rule BufferNeutralReplyFragment {
+  when: CustomerSendsSms(caller_phone, text)
+  requires: 
+    IntentSession.caller_phone = caller_phone and
+    IntentSession.status = awaiting_intent and
+    text.length > 0
+  ensures:
+    MessageBuffer.version = MessageBuffer.version + 1
+    MessageBuffer.pending_messages.contains(text)
+    Timer.scheduled(delay: 10s, token: MessageBuffer.version)
+}
+
+rule BouncerClassifiesPersonalReply {
+  when: DebounceTimerFires(business_id, caller_phone, token)
+  requires:
+    token = MessageBuffer.version and
+    IntentSession.caller_phone = caller_phone and
+    IntentSession.status = awaiting_intent and
+    Classifier.classify(join(MessageBuffer.pending_messages, "\n")) = "PERSONAL"
+  ensures:
+    full_text = join(MessageBuffer.pending_messages, "\n")
+    MessageBuffer.pending_messages = empty
+    IntentSession.status = resolved_personal
+    IntentSession.incoming_reply_text = full_text
+    IntentSession.classification_result = personal
+    contact.is_muted = true
+    contact.category = explicit_excluded
+    MuteMagicLink.token = generate_token()
+    SMS.forward_to_tradie(
+      from: caller_phone,
+      body: full_text,
+      footer: "Personal chat detected. Contact auto-muted. Magic link: " + MuteMagicLink.url
+    )
+    Bot.maintain_silence = true  -- $0 ongoing bot cost
+}
+
+rule BouncerClassifiesTradeServiceReply {
+  when: DebounceTimerFires(business_id, caller_phone, token)
+  requires:
+    token = MessageBuffer.version and
+    IntentSession.caller_phone = caller_phone and
+    IntentSession.status = awaiting_intent and
+    Classifier.classify(join(MessageBuffer.pending_messages, "\n")) = "SERVICE"
+  ensures:
+    full_text = join(MessageBuffer.pending_messages, "\n")
+    MessageBuffer.pending_messages = empty
+    IntentSession.status = resolved_service
+    IntentSession.incoming_reply_text = full_text
+    IntentSession.classification_result = service
+    AIReceptionist.hand_off_to_qualification(caller_phone, full_text)
+}
+
+--------------------------------------------------------------------------------
+-- 4. FRICTIONLESS TRADIE CONTROLS (1-TAP MAGIC LINK ONLY)
+--------------------------------------------------------------------------------
+
+rule TradieRedeemsMagicMuteLink {
+  when: TradieTapsMagicLink(token)
+  requires:
+    MuteMagicLink.token = token and
+    MuteMagicLink.is_redeemed = false
+  ensures:
+    MuteMagicLink.is_redeemed = true
+    target_contact = ContactProfile.lookup(MuteMagicLink.target_phone)
+    target_contact.is_muted = true
+    target_contact.category = explicit_excluded
+    Browser.render_page(status: "Contact Muted", target: target_contact.phone_number)
+}
+

@@ -5,6 +5,7 @@ import { TwilioSmsClient } from '../core/twilio-client.js';
 import { ServiceM8RestClient } from '../core/servicem8-client.js';
 import { CachedTenantProvider } from '../core/providers/cached-tenant.provider.js';
 import { ITenantProvider, TenantContext } from '../core/types/tenant.js';
+import { EligibilityEngine, IEligibilityRepository, ContactRecord, IntentSessionRecord, EligibilityDecisionResult } from '../core/eligibility/eligibility-engine.js';
 import { registerProcessMessageWorkerRoute } from '../routes/process-message.worker.js';
 
 interface SentSms {
@@ -17,6 +18,60 @@ interface DispatchedJob {
   lead: any;
   callerPhone: string;
   businessName: string;
+}
+
+class InMemoryEligibilityRepository implements IEligibilityRepository {
+  contacts = new Map<string, ContactRecord>();
+  intentSessions = new Map<string, IntentSessionRecord>();
+  magicLinks = new Map<string, { businessId: string; targetPhone: string; isRedeemed: boolean }>();
+  decisions: any[] = [];
+
+  async getContact(businessId: string, phoneNumber: string): Promise<ContactRecord | null> {
+    return this.contacts.get(`${businessId}:${phoneNumber}`) || null;
+  }
+
+  async upsertContact(contact: ContactRecord): Promise<void> {
+    this.contacts.set(`${contact.businessId}:${contact.phoneNumber}`, { ...contact });
+  }
+
+  async muteContact(businessId: string, phoneNumber: string): Promise<void> {
+    const contact = await this.getContact(businessId, phoneNumber);
+    if (contact) {
+      contact.isMuted = true;
+      contact.category = 'explicit_excluded';
+    } else {
+      this.contacts.set(`${businessId}:${phoneNumber}`, {
+        businessId,
+        phoneNumber,
+        category: 'explicit_excluded',
+        isMuted: true,
+      });
+    }
+  }
+
+  async getIntentSession(businessId: string, callerPhone: string): Promise<IntentSessionRecord | null> {
+    return this.intentSessions.get(`${businessId}:${callerPhone}`) || null;
+  }
+
+  async saveIntentSession(session: IntentSessionRecord): Promise<void> {
+    this.intentSessions.set(`${session.businessId}:${session.callerPhone}`, { ...session });
+  }
+
+  async createMagicLinkToken(token: string, businessId: string, targetPhone: string): Promise<void> {
+    this.magicLinks.set(token, { businessId, targetPhone, isRedeemed: false });
+  }
+
+  async redeemMagicLinkToken(token: string): Promise<{ success: boolean; targetPhone?: string; businessId?: string }> {
+    const link = this.magicLinks.get(token);
+    if (!link || link.isRedeemed) return { success: false };
+    link.isRedeemed = true;
+    await this.muteContact(link.businessId, link.targetPhone);
+    return { success: true, targetPhone: link.targetPhone, businessId: link.businessId };
+  }
+
+  async recordDecision(decision: EligibilityDecisionResult & { businessId: string; callerPhone: string }): Promise<void> {
+    this.decisions.push(decision);
+  }
 }
 
 /**
@@ -96,6 +151,9 @@ async function runLevel2ScenarioTests() {
   const sessionStore = new SessionStore({ useMemoryOnly: true });
   const gemini = new GeminiQualificationEvaluator();
 
+  const eligibilityRepo = new InMemoryEligibilityRepository();
+  const eligibilityEngine = new EligibilityEngine(eligibilityRepo);
+
   const app = Fastify({ logger: false });
   registerProcessMessageWorkerRoute(
     app,
@@ -103,7 +161,9 @@ async function runLevel2ScenarioTests() {
     gemini,
     mockTwilio,
     cachedTenant,
-    mockServiceM8
+    mockServiceM8,
+    undefined,
+    eligibilityEngine
   );
   await app.ready();
 
@@ -318,7 +378,7 @@ async function runLevel2ScenarioTests() {
   const s7Session = await sessionStore.getSession(mockTenant.tenantId, caller7);
   assert(s7Session?.status === 'ESCALATED', 'ABS-05: State transitions to ESCALATED');
   assert(
-    sentMessages.some(m => m.to === mockTenant.publicPhone && m.body.includes('🚨 ESCALATION')),
+    sentMessages.some(m => m.to === mockTenant.publicPhone && m.body.includes('ESCALATION ALERT')),
     'ABS-05: Dispatches escalation alert to Tradie mobile with transcript'
   );
   assert(
@@ -388,6 +448,47 @@ async function runLevel2ScenarioTests() {
   assert(!!s8Session?.collectedData.issue, 'TEL-05: Extracted issue from combined stream', `Issue: ${s8Session?.collectedData.issue}`);
   assert(!!s8Session?.collectedData.suburb, 'TEL-05: Extracted suburb from combined stream', `Suburb: ${s8Session?.collectedData.suburb}`);
   assert(sentMessages.length === 1, 'TEL-05: Dispatched exactly ONE combined SMS reply instead of 3 fragmented replies', `sentCount: ${sentMessages.length}`);
+
+  // ─────────────────────────────────────────────────────────────────
+  // SCENARIO 9: Pre-Flight Eligibility Engine Gatekeeper
+  // ─────────────────────────────────────────────────────────────────
+  console.log('\n9️⃣ Scenario 9: Pre-Flight Eligibility Gatekeeper & Contact Suppression');
+  const callerMuted = '+61499000099';
+  const callerNeutral = '+61499000098';
+
+  // 1. Muted contact triggers missed call -> Suppress ($0 cost)
+  await eligibilityRepo.muteContact(mockTenant.tenantId, callerMuted);
+  sentMessages.length = 0;
+  const s9MutedRes = await dispatchWorker({ eventType: 'MISSED_CALL', callerNumber: callerMuted });
+  assert(s9MutedRes.statusCode === 200, 'Eligibility: Muted caller returns 200');
+  const s9MutedBody = JSON.parse(s9MutedRes.body);
+  assert(s9MutedBody.status === 'suppressed', 'Eligibility: Muted caller status is suppressed');
+  assert(s9MutedBody.reason === 'personal_exclusion', 'Eligibility: Reason is personal_exclusion');
+  assert(sentMessages.length === 0, 'Eligibility: Zero outbound SMS sent ($0 cost gate)');
+
+  // 2. Known single-first-name contact triggers missed call -> Neutral SMS
+  await eligibilityRepo.upsertContact({
+    businessId: mockTenant.tenantId,
+    phoneNumber: callerNeutral,
+    category: 'single_first_name',
+    displayName: 'Dave',
+    isMuted: false,
+  });
+  sentMessages.length = 0;
+  const s9NeutralRes = await dispatchWorker({ eventType: 'MISSED_CALL', callerNumber: callerNeutral });
+  assert(s9NeutralRes.statusCode === 200, 'Eligibility: Uncertain contact returns 200');
+  const s9NeutralBody = JSON.parse(s9NeutralRes.body);
+  assert(s9NeutralBody.status === 'neutral_sms_dispatched', 'Eligibility: Dispatches neutral SMS');
+  assert(sentMessages.length === 1, 'Eligibility: Sends exactly one neutral SMS');
+  assert(sentMessages[0].body.includes("missed your call, what's up"), 'Eligibility: Dispatches casual check-in body');
+
+  // 3. Repeat call 2 minutes later -> Duplicate call suppression
+  sentMessages.length = 0;
+  const s9DupRes = await dispatchWorker({ eventType: 'MISSED_CALL', callerNumber: callerNeutral });
+  const s9DupBody = JSON.parse(s9DupRes.body);
+  assert(s9DupBody.status === 'suppressed', 'Eligibility: Duplicate call within 15 minutes is suppressed');
+  assert(s9DupBody.reason === 'duplicate_call_window', 'Eligibility: Reason is duplicate_call_window');
+  assert(sentMessages.length === 0, 'Eligibility: Suppressed call sends zero SMS');
 
   // ─────────────────────────────────────────────────────────────────
   // SUMMARY

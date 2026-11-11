@@ -4,6 +4,7 @@ import { registerTwilioVoiceRoutes } from './routes/twilio-voice.route.js';
 import { registerTwilioSmsRoutes } from './routes/twilio-sms.route.js';
 import { registerProcessMessageWorkerRoute } from './routes/process-message.worker.js';
 import { registerDemoRoutes } from './routes/demo.route.js';
+import { registerMagicMuteRoutes } from './routes/magic-mute.route.js';
 import { SessionStore } from './core/session-store.js';
 import { GeminiQualificationEvaluator } from './core/gemini-evaluator.js';
 import { TwilioSmsClient } from './core/twilio-client.js';
@@ -11,6 +12,10 @@ import { ServiceM8RestClient } from './core/servicem8-client.js';
 import { SanityTenantProvider } from './core/providers/sanity-tenant.provider.js';
 import { CachedTenantProvider } from './core/providers/cached-tenant.provider.js';
 import { MessageBufferManager } from './core/message-buffer.js';
+import { EligibilityEngine } from './core/eligibility/eligibility-engine.js';
+import { DrizzleEligibilityRepository } from './core/eligibility/drizzle-eligibility.repository.js';
+import { GeminiBouncerClassifier } from './core/eligibility/gemini-bouncer.js';
+import { getDb } from './core/db/index.js';
 import { Redis } from '@upstash/redis';
 import { env } from './config/env.js';
 
@@ -87,6 +92,17 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     ttlSeconds: 3600, // 1 hour TTL
   });
 
+  // Initialize Eligibility Engine & Drizzle PostgreSQL Repository
+  const db = getDb();
+  const eligibilityRepo = db ? new DrizzleEligibilityRepository(db) : null;
+  const eligibilityEngine = eligibilityRepo ? new EligibilityEngine(eligibilityRepo) : undefined;
+  const bouncerClassifier = new GeminiBouncerClassifier();
+
+  // Register 1-Tap Magic Mute Link Route (GET /m/:token)
+  if (eligibilityRepo) {
+    registerMagicMuteRoutes(app, eligibilityRepo);
+  }
+
   // Async Worker Route (Invoked by QStash)
   registerProcessMessageWorkerRoute(
     app,
@@ -94,7 +110,10 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     geminiEvaluator,
     twilioClient,
     cachedTenantProvider,
-    servicem8Client
+    servicem8Client,
+    bufferManager,
+    eligibilityEngine,
+    bouncerClassifier
   );
 
   // Interactive Web Simulator Demo (Option A: Mobile preview for client testing)
@@ -105,7 +124,9 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     twilioClient,
     cachedTenantProvider,
     servicem8Client,
-    bufferManager
+    bufferManager,
+    eligibilityEngine,
+    bouncerClassifier
   );
 
   return app;

@@ -6,6 +6,8 @@ import { ServiceM8RestClient } from '../core/servicem8-client.js';
 import { CachedTenantProvider } from '../core/providers/cached-tenant.provider.js';
 import { ITenantProvider, TenantContext } from '../core/types/tenant.js';
 import { MessageBufferManager } from '../core/message-buffer.js';
+import { EligibilityEngine } from '../core/eligibility/eligibility-engine.js';
+import { GeminiBouncerClassifier } from '../core/eligibility/gemini-bouncer.js';
 import { processMessageEvent } from '../core/services/message-dispatcher.js';
 
 interface DemoChatPayload {
@@ -23,7 +25,9 @@ export function registerDemoRoutes(
   twilio: TwilioSmsClient,
   tenantProvider: CachedTenantProvider,
   servicem8: ServiceM8RestClient,
-  bufferManager?: MessageBufferManager
+  bufferManager?: MessageBufferManager,
+  eligibilityEngine?: EligibilityEngine,
+  bouncerClassifier?: GeminiBouncerClassifier
 ) {
   // Demo Sandbox Mock: Intercepts and silences outbound Twilio SMS calls during web demo sessions
   // so external users playing with the demo don't incur Twilio balance charges or trigger alerts to the business owner
@@ -43,6 +47,8 @@ export function registerDemoRoutes(
       tenantProvider,
       servicem8,
       bufferManager,
+      eligibilityEngine,
+      bouncerClassifier,
       logger: app.log,
     });
   }
