@@ -52,15 +52,16 @@ export interface IEligibilityRepository {
   getContact(businessId: string, phoneNumber: string): Promise<ContactRecord | null>;
   upsertContact(contact: ContactRecord): Promise<void>;
   muteContact(businessId: string, phoneNumber: string): Promise<void>;
+  unmuteContact(businessId: string, phoneNumber: string): Promise<void>;
   getIntentSession(businessId: string, callerPhone: string): Promise<IntentSessionRecord | null>;
   saveIntentSession(session: IntentSessionRecord): Promise<void>;
   createMagicLinkToken(token: string, businessId: string, targetPhone: string): Promise<void>;
-  redeemMagicLinkToken(token: string): Promise<{ success: boolean; targetPhone?: string; businessId?: string }>;
+  redeemMagicLinkToken(token: string): Promise<{ success: boolean; targetPhone?: string; businessId?: string; actionTaken?: 'muted' | 'unmuted' }>;
   recordDecision(decision: EligibilityDecisionResult & { businessId: string; callerPhone: string }): Promise<void>;
 }
 
 export class EligibilityEngine {
-  constructor(private repo: IEligibilityRepository) {}
+  constructor(public readonly repo: IEligibilityRepository) {}
 
   /**
    * Deterministically evaluates whether a missed call should receive an SMS.

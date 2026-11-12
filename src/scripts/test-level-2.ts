@@ -49,6 +49,14 @@ class InMemoryEligibilityRepository implements IEligibilityRepository {
     }
   }
 
+  async unmuteContact(businessId: string, phoneNumber: string): Promise<void> {
+    const contact = await this.getContact(businessId, phoneNumber);
+    if (contact) {
+      contact.isMuted = false;
+      contact.category = 'commercial_contact';
+    }
+  }
+
   async getIntentSession(businessId: string, callerPhone: string): Promise<IntentSessionRecord | null> {
     return this.intentSessions.get(`${businessId}:${callerPhone}`) || null;
   }

@@ -12,6 +12,7 @@
     "test:level2": "tsx src/scripts/test-level-2.ts",
     "test:eligibility": "tsx src/scripts/test-eligibility.ts",
     "test:db": "tsx src/scripts/verify-db.ts",
+    "db:purge-demo": "tsx src/scripts/purge-demo-data.ts",
     "simulate": "tsx src/scripts/simulator-cli.ts"
   },
   "dependencies": {

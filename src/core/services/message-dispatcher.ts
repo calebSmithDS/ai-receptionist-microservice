@@ -124,7 +124,7 @@ export async function processMessageEvent(
       // Outcome 1: SUPPRESS ($0 gate)
       if (decision.action === 'suppress') {
         logger.info({ callerNumber, reason: decision.reason }, 'Missed call text-back suppressed by eligibility engine');
-        return { statusCode: 200, data: { status: 'suppressed', reason: decision.reason } };
+        return { statusCode: 200, data: { status: 'suppressed', reason: decision.reason, eligibility: decision } };
       }
 
       // Outcome 2: NEUTRAL_SMS (Uncertain relationship / single first-name contact)
@@ -139,8 +139,27 @@ export async function processMessageEvent(
           timestamp: new Date().toISOString(),
         });
         await sessionStore.saveSession(session);
-        logger.info({ callerNumber }, 'Dispatched neutral SMS to uncertain contact');
-        return { statusCode: 200, data: { status: 'neutral_sms_dispatched', reason: decision.reason } };
+
+        // Generate asynchronous 1-Tap Magic Mute link token for the tradie
+        let muteUrl: string | undefined;
+        try {
+          const token = Math.random().toString(36).substring(2, 10);
+          await eligibilityEngine.repo.createMagicLinkToken(token, businessId, callerNumber);
+          muteUrl = `/m/${token}`;
+        } catch (e: any) {
+          logger.warn({ err: e.message }, 'Failed to create magic mute link on neutral SMS');
+        }
+
+        logger.info({ callerNumber, muteUrl }, 'Dispatched neutral SMS to uncertain contact');
+        return {
+          statusCode: 200,
+          data: {
+            status: 'neutral_sms_dispatched',
+            reason: decision.reason,
+            eligibility: decision,
+            muteUrl,
+          },
+        };
       }
     }
 
@@ -166,12 +185,102 @@ export async function processMessageEvent(
 
     await sessionStore.saveSession(transitionResult.nextState);
     logger.info({ nextStatus: transitionResult.nextState.status }, 'Greeting dispatched');
-    return { statusCode: 200, data: { success: true, status: transitionResult.nextState.status } };
+    return {
+      statusCode: 200,
+      data: {
+        success: true,
+        status: transitionResult.nextState.status,
+        eligibility: { action: 'standard_sms', reason: 'unknown_caller', evaluatedAt: new Date().toISOString() },
+      },
+    };
   }
 
   // Case B: INBOUND CUSTOMER SMS
   if (eventType === 'INBOUND_SMS') {
-    const step1 = transition(session, { type: 'CUSTOMER_MESSAGE', text: body, mediaUrls });
+    // ── 1. PRE-FLIGHT GATEWAY: Check active IntentSession in Neon ───────────
+    if (eligibilityEngine) {
+      const intentSession = await eligibilityEngine.repo.getIntentSession(businessId, callerNumber);
+      if (intentSession && intentSession.status === 'awaiting_intent') {
+        logger.info({ callerNumber }, 'Active awaiting_intent session found in Neon — running Bouncer Classifier');
+
+        const bouncer = bouncerClassifier || new GeminiBouncerClassifier();
+        const classification = await bouncer.classify(body, tenant.tradeType || 'tradie');
+        logger.info({ callerNumber, classification: classification.classification, reasoning: classification.reasoning }, 'Bouncer classification complete');
+
+        if (classification.classification === 'PERSONAL') {
+          // Rule BouncerClassifiesPersonalReply:
+          // 1. Auto-mute contact in Neon
+          await eligibilityEngine.repo.muteContact(businessId, callerNumber);
+          // 2. Mark intent session as resolved_personal
+          await eligibilityEngine.repo.saveIntentSession({
+            ...intentSession,
+            status: 'resolved_personal',
+            incomingReplyText: body,
+            classificationResult: 'personal',
+          });
+
+          // 3. Generate 1-Tap Magic Mute confirmation token
+          let muteUrl: string | undefined;
+          try {
+            const token = Math.random().toString(36).substring(2, 10);
+            await eligibilityEngine.repo.createMagicLinkToken(token, businessId, callerNumber);
+            muteUrl = `/m/${token}`;
+          } catch (e: any) {
+            logger.warn({ err: e.message }, 'Failed to create magic mute link on personal reply');
+          }
+
+          // 4. Forward text directly to Tradie mobile with unmute link ($0 ongoing bot cost)
+          const contact = await eligibilityEngine.repo.getContact(businessId, callerNumber);
+          const contactName = contact?.displayName || callerNumber;
+          await twilio.sendSms({
+            from: dialedNumber,
+            to: ownerPhone,
+            body: `[Personal Chat from ${contactName}]: "${body}"\n\n🛡️ Contact auto-muted. Bot silenced.\nMistake? Tap to unmute: ${muteUrl || 'N/A'}`,
+          });
+
+          session.history.push({
+            role: 'customer',
+            content: body,
+            channel: 'twilio_sms',
+            timestamp: new Date().toISOString(),
+          });
+          await sessionStore.saveSession(session);
+
+          return {
+            statusCode: 200,
+            data: {
+              status: 'resolved_personal',
+              autoMuted: true,
+              forwardedToOwner: true,
+              silenced: true,
+              muteUrl,
+              contactName,
+              message: 'Personal chat detected. Contact auto-muted; receptionist silenced.',
+            },
+          };
+        } else {
+          // Classification is SERVICE:
+          // Resolve intent session and hand off to Lead Receptionist FSM!
+          await eligibilityEngine.repo.saveIntentSession({
+            ...intentSession,
+            status: 'resolved_service',
+            incomingReplyText: body,
+            classificationResult: 'service',
+          });
+          logger.info({ callerNumber }, 'Bouncer classified as SERVICE — handing off to Lead Receptionist FSM');
+        }
+      }
+    }
+
+    // ── 2. LEAD RECEPTIONIST FSM QUALIFICATION ─────────────────────────────
+    // If session is still in INIT (e.g. from a neutral_sms handoff), dispatch greeting transition first
+    let startingSession = session;
+    if (startingSession.status === 'INIT') {
+      const initGreeting = transition(startingSession, { type: 'DISPATCH_GREETING' });
+      startingSession = initGreeting.nextState;
+    }
+
+    const step1 = transition(startingSession, { type: 'CUSTOMER_MESSAGE', text: body, mediaUrls });
     let currentSession = step1.nextState;
 
     currentSession.history.push({
@@ -303,10 +412,22 @@ export async function processMessageEvent(
             .join(', ');
 
           const leadSummary = extractedInfo ? `\nDetails: ${extractedInfo}` : '';
+
+          let muteOption = '';
+          if (eligibilityEngine) {
+            try {
+              const muteToken = Math.random().toString(36).substring(2, 10);
+              await eligibilityEngine.repo.createMagicLinkToken(muteToken, businessId, callerNumber);
+              muteOption = `\nNot a customer? Tap to mute: /m/${muteToken}`;
+            } catch (e: any) {
+              logger.warn({ err: e.message }, 'Failed to create mute link on escalation');
+            }
+          }
+
           await twilio.sendSms({
             from: dialedNumber,
             to: ownerPhone,
-            body: `🚨 [ESCALATION ALERT - ${reason}]\nCustomer: ${callerNumber}\nLatest Msg: "${body}"${leadSummary}\nAction: Contact customer immediately.`,
+            body: `🚨 [ESCALATION ALERT - ${reason}]\nCustomer: ${callerNumber}\nLatest Msg: "${body}"${leadSummary}\nAction: Contact customer immediately.${muteOption}`,
           });
           break;
         }

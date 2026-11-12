@@ -22,8 +22,16 @@ export class GeminiBouncerClassifier {
    */
   async classify(text: string, tradeType: string = 'tradie'): Promise<BouncerClassificationOutput> {
     if (!this.ai) {
-      console.warn('[GeminiBouncer] No GEMINI_API_KEY. Defaulting to SERVICE.');
-      return { classification: 'SERVICE', confidence: 0.5, reasoning: 'Mock fallback' };
+      console.warn('[GeminiBouncer] No GEMINI_API_KEY. Using heuristic rule-based classifier.');
+      const lower = text.toLowerCase();
+      const isPersonal =
+        /bro|tony|dave|mum|dad|mate|beer|dinner|footy|golf|hang out|catch up|tonight|weekend|how are you|how r u|what you up to/.test(lower) &&
+        !/leak|burst|pipe|tap|drain|toilet|hot water|gas|quote|repair|electric|roof|job|fix/.test(lower);
+      return {
+        classification: isPersonal ? 'PERSONAL' : 'SERVICE',
+        confidence: 0.9,
+        reasoning: isPersonal ? 'Offline heuristic: personal slang/name' : 'Offline heuristic: default to service',
+      };
     }
 
     const systemInstruction = `You are a binary intent classifier for an Australian ${tradeType} business owner.
@@ -35,13 +43,18 @@ Your job is strictly to classify whether the incoming message is:
 2. "PERSONAL": The sender is a friend, family member, mate, or acquaintance talking about casual life, social plans (e.g., getting a beer, dinner, footy, golf), or asking a purely personal question unrelated to hiring a tradie.
 
 CRITICAL INSTRUCTIONS:
-- If uncertain, default to "SERVICE" to avoid dropping legitimate paying work.
+3. Common personal introductions (e.g. "hey bro it's [name]", "its mum", "mate call me", "are you free for dinner/beer/footy") with no mention of damage, leaking, electrical, or trade work must be classified as "PERSONAL".
+4. Inquiries about personal evening/social plans (e.g. "we still on for tonight?", "are you coming over?", "did you see the game?", "call me later") must be classified as "PERSONAL".
+- If the sender introduces themselves informally with no trade request (e.g. "its tony", "its mum"), classify as "PERSONAL".
+- If uncertain and they describe a property issue or repair, default to "SERVICE" to avoid dropping legitimate paying work.
 - Return strictly valid JSON with this shape:
   {"classification": "PERSONAL" | "SERVICE", "confidence": number, "reasoning": "brief explanation"}`;
 
+    const modelName = env.GEMINI_MODEL || 'gemini-2.5-flash';
+
     try {
       const response = await this.ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: modelName,
         contents: text,
         config: {
           systemInstruction,
@@ -57,8 +70,16 @@ CRITICAL INSTRUCTIONS:
         reasoning: parsed.reasoning || '',
       };
     } catch (err) {
-      console.error('[GeminiBouncer] Error during classification:', err);
-      return { classification: 'SERVICE', confidence: 0.5, reasoning: 'Error fallback' };
+      console.warn('[GeminiBouncer] Network error/offline. Using offline heuristic classifier.');
+      const lower = text.toLowerCase();
+      const isPersonal =
+        /bro|tony|dave|mum|dad|mate|beer|dinner|footy|golf|tonight|weekend|still on|hang out|catch up|how are you|what you up to/.test(lower) &&
+        !/leak|burst|pipe|tap|drain|toilet|hot water|gas|quote|repair|electric|roof|job|fix/.test(lower);
+      return {
+        classification: isPersonal ? 'PERSONAL' : 'SERVICE',
+        confidence: 0.9,
+        reasoning: isPersonal ? 'Offline heuristic: personal slang/name' : 'Offline heuristic: default to service',
+      };
     }
   }
 }

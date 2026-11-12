@@ -4,6 +4,7 @@ import { registerTwilioVoiceRoutes } from './routes/twilio-voice.route.js';
 import { registerTwilioSmsRoutes } from './routes/twilio-sms.route.js';
 import { registerProcessMessageWorkerRoute } from './routes/process-message.worker.js';
 import { registerDemoRoutes } from './routes/demo.route.js';
+import { registerLandingRoute } from './routes/landing.route.js';
 import { registerMagicMuteRoutes } from './routes/magic-mute.route.js';
 import { SessionStore } from './core/session-store.js';
 import { GeminiQualificationEvaluator } from './core/gemini-evaluator.js';
@@ -115,6 +116,9 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     eligibilityEngine,
     bouncerClassifier
   );
+
+  // Root Landing Route (GET / - Beta announcement and demo launcher)
+  registerLandingRoute(app);
 
   // Interactive Web Simulator Demo (Option A: Mobile preview for client testing)
   registerDemoRoutes(

@@ -30,3 +30,9 @@ jobs:
       - name: Run Level 1 State Machine Unit Tests
         run: npm run test:level1
 
+      - name: Run Eligibility Engine & Bouncer Invariant Tests
+        run: npm run test:eligibility
+
+      - name: Run Integrated Level 2 Scenario Battery
+        run: npm run test:level2
+

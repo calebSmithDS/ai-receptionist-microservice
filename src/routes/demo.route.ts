@@ -9,13 +9,25 @@ import { MessageBufferManager } from '../core/message-buffer.js';
 import { EligibilityEngine } from '../core/eligibility/eligibility-engine.js';
 import { GeminiBouncerClassifier } from '../core/eligibility/gemini-bouncer.js';
 import { processMessageEvent } from '../core/services/message-dispatcher.js';
+import { getDb } from '../core/db/index.js';
+import { sql } from 'drizzle-orm';
+import * as schema from '../core/db/schema.js';
 
 interface DemoChatPayload {
   message?: string;
   isMissedCall?: boolean;
   tenantConfig?: Partial<TenantContext>;
   callerId?: string;
+  sessionToken?: string;
+  callerPersona?: 'unknown' | 'mum_muted' | 'dave_subbie';
   debounceVersion?: number;
+}
+
+interface DemoTimeTravelPayload {
+  callerId: string;
+  businessId: string;
+  offsetMinutes: number; // e.g. -16 (for duplicate call window) or -250 (for 4hr SMS window)
+  targetField: 'lastMissedCallAt' | 'lastInteractionAt';
 }
 
 export function registerDemoRoutes(
@@ -52,6 +64,7 @@ export function registerDemoRoutes(
       logger: app.log,
     });
   }
+
   // ── 1. Serve the interactive mobile phone simulator UI ─────────────────
   app.get('/demo', async (_req: FastifyRequest, reply: FastifyReply) => {
     reply.type('text/html');
@@ -62,9 +75,20 @@ export function registerDemoRoutes(
   app.post(
     '/api/demo/chat',
     async (req: FastifyRequest<{ Body: DemoChatPayload }>, reply: FastifyReply) => {
-      const { message = '', isMissedCall = false, tenantConfig, callerId = '+61499112233', debounceVersion } = req.body;
+      const {
+        message = '',
+        isMissedCall = false,
+        tenantConfig,
+        callerId = '+61499112233',
+        sessionToken,
+        callerPersona = 'unknown',
+        debounceVersion,
+      } = req.body;
+
       const dialedNumber = '+17372508034';
-      const businessId = tenantConfig?.tenantId || 'tenant_caleb_plumbing';
+      // Isolate multi-client sessions using sessionToken namespace
+      const tokenSuffix = sessionToken ? `_${sessionToken}` : '';
+      const businessId = (tenantConfig?.tenantId || 'demo_caleb_plumbing') + tokenSuffix;
 
       // Allow on-the-fly tenant customization from the UI drawer
       if (tenantConfig) {
@@ -87,19 +111,51 @@ export function registerDemoRoutes(
           excludedServices: tenantConfig.excludedServices || ['Commercial roofing', 'Solar hot water panels'],
         };
 
-        // Cache the custom tenant in Redis so the worker reads this updated profile
         const redisClient = (tenantProvider as any).redis;
         if (redisClient) {
           await redisClient.set(`tenant:config:${dialedNumber}`, fullTenant, { ex: 3600 });
         }
       }
 
+      // Pre-seed Persona in Neon DB if requested for deterministic demonstration
+      // Note: We use onConflictDoNothing() so we don't overwrite user-applied
+      // actions like 1-Tap Mute or Unmute if the contact already exists!
+      const db = getDb();
+      if (db && isMissedCall) {
+        const contactId = `${businessId}:${callerId}`;
+        if (callerPersona === 'mum_muted') {
+          await db
+            .insert(schema.contacts)
+            .values({
+              id: contactId,
+              businessId,
+              phoneNumber: callerId,
+              displayName: 'Mum',
+              category: 'explicit_excluded',
+              isMuted: true,
+            })
+            .onConflictDoNothing();
+        } else if (callerPersona === 'dave_subbie') {
+          await db
+            .insert(schema.contacts)
+            .values({
+              id: contactId,
+              businessId,
+              phoneNumber: callerId,
+              displayName: 'Dave',
+              category: 'single_first_name',
+              isMuted: false,
+            })
+            .onConflictDoNothing();
+        }
+      }
+
       // If resetting or starting fresh with a missed call
       if (isMissedCall) {
         await sessionStore.deleteSession(businessId, callerId);
-        
+
         // Trigger missed call via internal worker invocation
-        await invokeWorkerDirectly({
+        const workerResult = await invokeWorkerDirectly({
           eventType: 'MISSED_CALL',
           channel: 'twilio_voice',
           callerNumber: callerId,
@@ -109,16 +165,18 @@ export function registerDemoRoutes(
         });
 
         const session = await sessionStore.getSession(businessId, callerId);
+        const lastMsg = session?.history[session.history.length - 1];
+
         return reply.send({
           success: true,
           session,
-          initialGreeting: session?.history[0]?.content || "Hi, this is Caleb's assistant...",
+          initialGreeting: lastMsg?.content || null,
+          workerResult: workerResult?.data,
+          eligibility: workerResult?.data?.eligibility,
         });
       }
 
       // Customer sends an SMS message
-      // If debounceVersion is provided, drain and evaluate buffer.
-      // Otherwise evaluate this message directly.
       const result = await invokeWorkerDirectly({
         eventType: 'INBOUND_SMS',
         channel: 'twilio_sms',
@@ -130,7 +188,6 @@ export function registerDemoRoutes(
         debounceVersion,
       });
 
-      // If skipped because a newer message arrived in the buffer, return skipped status
       if (result?.data?.status === 'skipped') {
         return reply.send({ success: true, skipped: true });
       }
@@ -144,17 +201,69 @@ export function registerDemoRoutes(
         session,
         forwardedToOwner: isForwardedToOwner,
         reply: lastReply?.role === 'assistant' ? lastReply.content : null,
+        workerResult: result?.data,
       });
     }
   );
 
-  // ── 3. Reset demo session ─────────────────────────────────────────────
-  app.post('/api/demo/reset', async (req: FastifyRequest<{ Body: { callerId?: string; businessId?: string } }>, reply: FastifyReply) => {
-    const callerId = req.body?.callerId || '+61499112233';
-    const businessId = req.body?.businessId || 'tenant_caleb_plumbing';
-    await sessionStore.deleteSession(businessId, callerId);
-    return reply.send({ success: true });
-  });
+  // ── 3. Tab-Safe Reset: Wipes only THIS browser tab's demo data ───────────
+  app.post(
+    '/api/demo/reset-tab',
+    async (req: FastifyRequest<{ Body: { callerId?: string; sessionToken?: string; businessId?: string } }>, reply: FastifyReply) => {
+      const { callerId, sessionToken } = req.body || {};
+      const tokenSuffix = sessionToken ? `_${sessionToken}` : '';
+      const businessId = (req.body?.businessId || 'demo_caleb_plumbing') + tokenSuffix;
+
+      if (callerId) {
+        await sessionStore.deleteSession(businessId, callerId);
+      }
+
+      // Clean up tab records from Neon DB
+      const db = getDb();
+      if (db && sessionToken) {
+        try {
+          await db.execute(sql`DELETE FROM eligibility_decisions WHERE business_id = ${businessId};`);
+          await db.execute(sql`DELETE FROM intent_sessions WHERE business_id = ${businessId};`);
+          await db.execute(sql`DELETE FROM mute_magic_links WHERE business_id = ${businessId};`);
+          await db.execute(sql`DELETE FROM contacts WHERE business_id = ${businessId};`);
+        } catch (e: any) {
+          app.log.warn({ err: e.message }, 'Failed to delete tab DB records on reset');
+        }
+      }
+
+      return reply.send({ success: true, message: 'Tab session reset successfully' });
+    }
+  );
+
+  // ── 4. Time-Travel Simulation for 15-Minute & 4-Hour Rules ────────────────
+  app.post(
+    '/api/demo/time-travel',
+    async (req: FastifyRequest<{ Body: DemoTimeTravelPayload }>, reply: FastifyReply) => {
+      const { callerId, businessId, offsetMinutes, targetField } = req.body;
+      const db = getDb();
+      if (!db) {
+        return reply.status(400).send({ error: 'Database not connected' });
+      }
+
+      const targetTime = new Date(Date.now() + offsetMinutes * 60 * 1000);
+      const contactId = `${businessId}:${callerId}`;
+
+      try {
+        if (targetField === 'lastMissedCallAt') {
+          await db.execute(
+            sql`UPDATE contacts SET last_missed_call_at = ${targetTime} WHERE id = ${contactId};`
+          );
+        } else if (targetField === 'lastInteractionAt') {
+          await db.execute(
+            sql`UPDATE contacts SET last_interaction_at = ${targetTime} WHERE id = ${contactId};`
+          );
+        }
+        return reply.send({ success: true, adjustedTime: targetTime.toISOString() });
+      } catch (err: any) {
+        return reply.status(500).send({ error: err.message });
+      }
+    }
+  );
 }
 
 function getDemoHtml(): string {
@@ -174,6 +283,10 @@ function getDemoHtml(): string {
       --bubble-bot: #21262d;
       --text: #f0f6fc;
       --text-muted: #8b949e;
+      --pill-green: #238636;
+      --pill-amber: #d29922;
+      --pill-purple: #8957e5;
+      --pill-blue: #1f6feb;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     body {
@@ -240,6 +353,41 @@ function getDemoHtml(): string {
       font-size: 12px;
       cursor: pointer;
     }
+    /* Diagnostic Bar */
+    .diag-bar {
+      display: none;
+      background: #161b22;
+      border-bottom: 1px solid var(--border);
+      padding: 8px 14px;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      z-index: 9;
+    }
+    .diag-pill {
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .diag-pill.standard { background: rgba(35, 134, 54, 0.2); color: #3fb950; border: 1px solid #238636; }
+    .diag-pill.suppressed { background: rgba(210, 153, 34, 0.2); color: #d29922; border: 1px solid #d29922; }
+    .diag-pill.muted { background: rgba(137, 87, 229, 0.2); color: #a371f7; border: 1px solid #8957e5; }
+    .diag-pill.neutral { background: rgba(31, 111, 235, 0.2); color: #58a6ff; border: 1px solid #1f6feb; }
+    .diag-meta { color: var(--text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
+    .diag-action-btn {
+      background: #21262d;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 3px 8px;
+      font-size: 10px;
+      cursor: pointer;
+    }
     /* Chat stream */
     .messages-container {
       flex: 1;
@@ -285,10 +433,11 @@ function getDemoHtml(): string {
       font-size: 11px;
       color: var(--text-muted);
       background: rgba(255,255,255,0.05);
-      padding: 4px 10px;
+      padding: 5px 12px;
       border-radius: 10px;
       text-align: center;
       margin: 4px 0;
+      line-height: 1.4;
     }
     /* Bottom bar */
     .chat-input-bar {
@@ -372,25 +521,43 @@ function getDemoHtml(): string {
       cursor: pointer;
       margin-top: 8px;
     }
-    /* Indicator pills */
-    .status-badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 10px;
+    .time-travel-box {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      margin: 14px 0;
+    }
+    .time-travel-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #58a6ff;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-time-travel {
+      background: #21262d;
+      border: 1px solid #388bfd;
+      color: #58a6ff;
+      padding: 6px 10px;
+      border-radius: 8px;
       font-size: 11px;
       font-weight: 600;
+      cursor: pointer;
+      margin-right: 6px;
       margin-top: 4px;
     }
-    .badge-qualifying { background: #388bfd33; color: #58a6ff; }
-    .badge-completed { background: #23863633; color: #3fb950; }
-    .badge-escalated { background: #f8514933; color: #f85149; }
   </style>
 </head>
 <body>
   <div class="app-container">
     <!-- Header -->
     <div class="ios-header">
-      <div style="width: 50px;"></div>
+      <div style="width: 50px;">
+        <button id="btnDebugToggle" onclick="toggleDebugMode()" style="background:none; border:none; color:var(--text-muted); font-size:16px; cursor:pointer;" title="Toggle Developer Diagnostics">🛡️</button>
+      </div>
       <div class="header-contact">
         <div class="avatar" id="avatarLetter">C</div>
         <div class="contact-name" id="displayBizName">Caleb's Plumbing</div>
@@ -399,9 +566,18 @@ function getDemoHtml(): string {
       <button class="btn-toggle-config" onclick="toggleDrawer()">⚙️ Rules</button>
     </div>
 
+    <!-- Diagnostic Pill Bar (Visible in debug mode) -->
+    <div class="diag-bar" id="diagBar">
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span class="diag-pill standard" id="diagPill">STANDARD</span>
+        <span class="diag-meta" id="diagReason">unknown_caller</span>
+      </div>
+      <button class="diag-action-btn" id="btnSimulateCall" onclick="simulateMissedCall()">📞 Test Call</button>
+    </div>
+
     <!-- Messages -->
     <div class="messages-container" id="messagesList">
-      <div class="msg-notice">📞 Missed call intercepted (30s ago)</div>
+      <div class="msg-notice">📞 Missed call intercepted</div>
     </div>
 
     <!-- Input -->
@@ -413,8 +589,34 @@ function getDemoHtml(): string {
     <!-- Settings Drawer -->
     <div class="config-drawer" id="configDrawer">
       <div class="drawer-title">
-        <span>Business Rules & Tenant</span>
+        <span>Settings & Diagnostics</span>
         <button onclick="toggleDrawer()" style="background:none; border:none; color:#fff; font-size:20px; cursor:pointer;">✕</button>
+      </div>
+
+      <!-- Caller Persona Selector -->
+      <div class="form-group">
+        <label>Caller Persona (Pre-Flight Gate Test)</label>
+        <select class="form-control" id="cfgPersona" onchange="handlePersonaChange()">
+          <option value="unknown" selected>🆕 Unknown Customer (Standard Qualification)</option>
+          <option value="mum_muted">👩 Mum / Family (Muted - $0 Silent Suppression)</option>
+          <option value="dave_subbie">🔨 Dave / Subbie (Single First Name - Neutral SMS)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Caller Phone Number (Auto-Assigned & Isolated)</label>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <input type="text" class="form-control" id="cfgCallerId" readonly style="opacity:0.75; cursor:not-allowed; background:#090d13; color:#58a6ff; font-family:monospace; font-weight:600;" />
+          <span style="font-size:11px; color:var(--text-muted); white-space:nowrap;">🔒 Sandbox</span>
+        </div>
+        <p style="font-size:10.5px; color:var(--text-muted); margin-top:4px;">Each persona is automatically assigned a safe +61499... sandbox number isolated to your browser tab.</p>
+      </div>
+
+      <!-- Time-Travel Sandbox Simulation -->
+      <div class="time-travel-box">
+        <div class="time-travel-title">⏳ Time-Travel Sandbox (Skip Waiting Windows)</div>
+        <button class="btn-time-travel" onclick="timeTravel(-16, 'lastMissedCallAt')">⏩ +16 Mins (Clear Duplicate Window)</button>
+        <button class="btn-time-travel" onclick="timeTravel(-250, 'lastInteractionAt')">⏩ +4.2 Hrs (Clear SMS Window)</button>
       </div>
 
       <div class="form-group">
@@ -439,7 +641,7 @@ function getDemoHtml(): string {
       </div>
 
       <div class="form-group">
-        <label>Services & Starting Prices (One per line: Service: Price)</label>
+        <label>Services & Starting Prices (Service: Price)</label>
         <textarea class="form-control" id="cfgServices" rows="3">Blocked Drains: From $150
 Burst Pipe Repair: From $180 call-out
 Hot Water Replacement: Quote on site</textarea>
@@ -456,12 +658,42 @@ Hot Water Replacement: Quote on site</textarea>
       </div>
 
       <button class="btn-apply" onclick="applySettingsAndRestart()">Apply & Start New Chat</button>
-      <button class="btn-reset" onclick="resetChat()">Reset Conversation</button>
+      <button class="btn-reset" onclick="resetThisTab()">🧹 Reset Tab & Wipe Test Records</button>
     </div>
   </div>
 
   <script>
-    let callerId = '+61499' + Math.floor(100000 + Math.random() * 900000);
+    // Tab-scoped isolated session token
+    let sessionToken = sessionStorage.getItem('tradie_demo_token');
+    if (!sessionToken) {
+      sessionToken = Math.random().toString(36).substring(2, 7);
+      sessionStorage.setItem('tradie_demo_token', sessionToken);
+    }
+
+    // Persona-based caller numbers isolated to this session
+    function getCallerIdForPersona(persona) {
+      const baseSuffix = sessionToken.replace(/[^0-9]/g, '8').padEnd(4, '0').slice(0, 4);
+      if (persona === 'mum_muted') return '+6149920' + baseSuffix;
+      if (persona === 'dave_subbie') return '+6149930' + baseSuffix;
+      return '+6149910' + baseSuffix; // unknown
+    }
+
+    let currentPersona = 'unknown';
+    let callerId = getCallerIdForPersona(currentPersona);
+    document.getElementById('cfgCallerId').value = callerId;
+
+    // Check if debug mode enabled via URL (?debug=true) or toggle
+    let isDebugMode = window.location.search.includes('debug=true');
+    function updateDebugVisibility() {
+      const bar = document.getElementById('diagBar');
+      bar.style.display = isDebugMode ? 'flex' : 'none';
+      document.getElementById('btnDebugToggle').style.color = isDebugMode ? '#58a6ff' : 'var(--text-muted)';
+    }
+    function toggleDebugMode() {
+      isDebugMode = !isDebugMode;
+      updateDebugVisibility();
+    }
+    updateDebugVisibility();
 
     function toggleDrawer() {
       document.getElementById('configDrawer').classList.toggle('open');
@@ -485,6 +717,28 @@ Hot Water Replacement: Quote on site</textarea>
       div.innerText = text;
       container.appendChild(div);
       scrollToBottom(true);
+    }
+
+    function updateEligibilityBadge(eligibility) {
+      if (!eligibility) return;
+      console.log('🛡️ [Eligibility Engine Decision]:', eligibility);
+
+      const pill = document.getElementById('diagPill');
+      const reasonEl = document.getElementById('diagReason');
+
+      pill.className = 'diag-pill ' + (
+        eligibility.action === 'standard_sms' ? 'standard' :
+        eligibility.action === 'suppress' ? (eligibility.reason === 'personal_exclusion' ? 'muted' : 'suppressed') :
+        'neutral'
+      );
+      pill.innerText = eligibility.action.replace('_sms', '').toUpperCase();
+      reasonEl.innerText = eligibility.reason || 'processed';
+    }
+
+    function handlePersonaChange() {
+      currentPersona = document.getElementById('cfgPersona').value;
+      callerId = getCallerIdForPersona(currentPersona);
+      document.getElementById('cfgCallerId').value = callerId;
     }
 
     function handleTradeChange() {
@@ -550,17 +804,40 @@ Hot Water Replacement: Quote on site</textarea>
       };
     }
 
-    async function initGreeting() {
+    async function simulateMissedCall() {
+      const container = document.getElementById('messagesList');
+      const notice = document.createElement('div');
+      notice.className = 'msg-notice';
+      notice.innerHTML = '📞 <i>Missed call from ' + callerId + '...</i>';
+      container.appendChild(notice);
+      scrollToBottom(true);
+
       const res = await fetch('/api/demo/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           isMissedCall: true,
           callerId: callerId,
+          sessionToken: sessionToken,
+          callerPersona: currentPersona,
           tenantConfig: getTenantConfig(),
         }),
       });
       const data = await res.json();
+
+      updateEligibilityBadge(data.eligibility);
+
+      if (data.eligibility && data.eligibility.action === 'suppress') {
+        const supNotice = document.createElement('div');
+        supNotice.className = 'msg-notice';
+        supNotice.style.background = 'rgba(210, 153, 34, 0.15)';
+        supNotice.style.color = '#d29922';
+        supNotice.innerHTML = '🛡️ <b>Text-Back Suppressed ($0 Cost)</b><br><span style="font-size:10px;">Reason: ' + data.eligibility.reason + '</span>';
+        container.appendChild(supNotice);
+        scrollToBottom(true);
+        return;
+      }
+
       if (data.initialGreeting) {
         addMessage(data.initialGreeting, false);
       }
@@ -602,7 +879,6 @@ Hot Water Replacement: Quote on site</textarea>
     async function executeEvaluationTurn() {
       if (pendingMessageBuffer.length === 0) return;
       
-      // Show subtle typing bubble while Gemini processes
       const container = document.getElementById('messagesList');
       const typingEl = document.createElement('div');
       typingEl.id = 'typingBubble';
@@ -618,6 +894,8 @@ Hot Water Replacement: Quote on site</textarea>
         body: JSON.stringify({
           message: pendingMessageBuffer.join('\\n'),
           callerId: callerId,
+          sessionToken: sessionToken,
+          callerPersona: currentPersona,
           tenantConfig: getTenantConfig(),
         }),
       });
@@ -626,6 +904,22 @@ Hot Water Replacement: Quote on site</textarea>
       
       const el = document.getElementById('typingBubble');
       if (el) el.remove();
+
+      if (data.workerResult?.status === 'resolved_personal') {
+        const ownerName = getTenantConfig().ownerFirstName || 'the tradie';
+        const muteUrl = data.workerResult.muteUrl;
+        const noticeEl = document.createElement('div');
+        noticeEl.className = 'msg-notice';
+        noticeEl.style.background = 'rgba(137, 87, 229, 0.15)';
+        noticeEl.style.borderColor = '#8957e5';
+        noticeEl.style.color = '#a371f7';
+        noticeEl.innerHTML = '🛡️ <b>Personal Chat Detected — Auto-Muted!</b><br><span style="font-size:10px; color:#c9d1d9;">Bot silenced at $0 cost. Forwarded to ' + ownerName + ' to reply personally.</span>' +
+          (muteUrl ? '<br><a href="' + muteUrl + '" target="_blank" style="color:#58a6ff; font-weight:600; text-decoration:underline; font-size:10px; display:inline-block; margin-top:4px;">🔓 Mistake? Tap to Unmute (' + muteUrl + ')</a>' : '');
+        document.getElementById('messagesList').appendChild(noticeEl);
+        updateStatusBadge('RESOLVED_PERSONAL');
+        scrollToBottom(true);
+        return;
+      }
 
       if (data.reply) {
         addMessage(data.reply, false);
@@ -657,7 +951,6 @@ Hot Water Replacement: Quote on site</textarea>
       pendingMessageBuffer.push(text);
       input.value = '';
 
-      // Reset debounce timer on every new message!
       if (debounceTimer) clearTimeout(debounceTimer);
       if (countdownInterval) clearInterval(countdownInterval);
 
@@ -689,26 +982,51 @@ Hot Water Replacement: Quote on site</textarea>
       if (e.key === 'Enter') sendMessage();
     }
 
+    async function timeTravel(offsetMinutes, targetField) {
+      const res = await fetch('/api/demo/time-travel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callerId: callerId,
+          businessId: 'demo_caleb_plumbing_' + sessionToken,
+          offsetMinutes: offsetMinutes,
+          targetField: targetField,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert('⏳ Time-travel complete! ' + targetField + ' set to ' + offsetMinutes + ' mins ago.');
+      } else {
+        alert('Time-travel failed: ' + (data.error || 'Check Neon DB connection'));
+      }
+    }
+
     async function applySettingsAndRestart() {
       toggleDrawer();
       document.getElementById('messagesList').innerHTML = '<div class="msg-notice">🔄 Rules Updated. Starting fresh missed call...</div>';
-      callerId = '+61499' + Math.floor(100000 + Math.random() * 900000);
       document.getElementById('displayBizName').innerText = document.getElementById('cfgBizName').value;
       document.getElementById('avatarLetter').innerText = (document.getElementById('cfgOwnerName').value[0] || 'T').toUpperCase();
-      await initGreeting();
+      await simulateMissedCall();
     }
 
-    async function resetChat() {
+    async function resetThisTab() {
       toggleDrawer();
-      document.getElementById('messagesList').innerHTML = '<div class="msg-notice">🔄 Session Reset. Fresh missed call...</div>';
-      callerId = '+61499' + Math.floor(100000 + Math.random() * 900000);
-      await initGreeting();
+      document.getElementById('messagesList').innerHTML = '<div class="msg-notice">🧹 Tab Session Reset. Neon test data purged.</div>';
+      await fetch('/api/demo/reset-tab', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callerId: callerId,
+          sessionToken: sessionToken,
+          businessId: 'demo_caleb_plumbing',
+        }),
+      });
+      await simulateMissedCall();
     }
 
     // Auto-init on page load
-    initGreeting();
+    simulateMissedCall();
   </script>
 </body>
 </html>`;
 }
-

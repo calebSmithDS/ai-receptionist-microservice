@@ -21,7 +21,7 @@ export function registerMagicMuteRoutes(app: FastifyInstance, repo: IEligibility
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Link Expired or Already Used</title>
+  <title>Invalid Link</title>
   <style>
     body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
     .card { background: #161b22; border: 1px solid #30363d; border-radius: 16px; padding: 32px 24px; max-width: 360px; width: 90%; }
@@ -30,33 +30,39 @@ export function registerMagicMuteRoutes(app: FastifyInstance, repo: IEligibility
 </head>
 <body>
   <div class="card">
-    <h2>⚠️ Link Already Used</h2>
-    <p>This mute link has already been redeemed or is no longer valid.</p>
+    <h2>⚠️ Link Invalid</h2>
+    <p>This link is no longer valid or could not be found.</p>
   </div>
 </body>
 </html>`;
     }
+
+    const isUnmuted = result.actionTaken === 'unmuted';
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Contact Muted</title>
+  <title>${isUnmuted ? 'Contact Unmuted' : 'Contact Muted'}</title>
   <style>
     body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
     .card { background: #161b22; border: 1px solid #30363d; border-radius: 16px; padding: 32px 24px; max-width: 360px; width: 90%; }
     .icon { font-size: 48px; margin-bottom: 12px; }
-    h2 { color: #3fb950; margin: 0 0 8px; }
-    p { margin: 0 0 16px; color: #8b949e; font-size: 14px; }
+    h2 { color: ${isUnmuted ? '#58a6ff' : '#3fb950'}; margin: 0 0 8px; }
+    p { margin: 0 0 16px; color: #8b949e; font-size: 14px; line-height: 1.4; }
     .badge { background: #21262d; border: 1px solid #30363d; padding: 6px 12px; border-radius: 8px; font-weight: 600; color: #fff; display: inline-block; }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="icon">✅</div>
-    <h2>Contact Muted</h2>
-    <p>This number will never receive automated AI texts or missed-call replies again.</p>
+    <div class="icon">${isUnmuted ? '🔓' : '🔕'}</div>
+    <h2>${isUnmuted ? 'Contact Unmuted' : 'Contact Muted'}</h2>
+    <p>${
+      isUnmuted
+        ? 'This number has been upgraded to a verified client. The AI will never auto-mute them again.'
+        : 'This number is now muted and will never receive automated AI texts or missed-call replies again.'
+    }</p>
     <div class="badge">${result.targetPhone}</div>
   </div>
 </body>

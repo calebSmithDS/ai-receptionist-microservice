@@ -71,6 +71,18 @@ export class DrizzleEligibilityRepository implements IEligibilityRepository {
       .where(eq(schema.contacts.id, id));
   }
 
+  async unmuteContact(businessId: string, phoneNumber: string): Promise<void> {
+    const id = `${businessId}:${phoneNumber}`;
+    await this.db
+      .update(schema.contacts)
+      .set({
+        isMuted: false,
+        category: 'commercial_contact', // Upgraded to verified commercial client so AI never auto-mutes them again!
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.contacts.id, id));
+  }
+
   async getIntentSession(businessId: string, callerPhone: string): Promise<IntentSessionRecord | null> {
     const id = `${businessId}:${callerPhone}`;
     const [row] = await this.db
@@ -124,15 +136,25 @@ export class DrizzleEligibilityRepository implements IEligibilityRepository {
     });
   }
 
-  async redeemMagicLinkToken(token: string): Promise<{ success: boolean; targetPhone?: string; businessId?: string }> {
+  async redeemMagicLinkToken(token: string): Promise<{ success: boolean; targetPhone?: string; businessId?: string; actionTaken?: 'muted' | 'unmuted' }> {
     const [row] = await this.db
       .select()
       .from(schema.muteMagicLinks)
       .where(eq(schema.muteMagicLinks.token, token))
       .limit(1);
 
-    if (!row || row.isRedeemed) {
+    if (!row) {
       return { success: false };
+    }
+
+    // Dynamic 2-Way Toggle: Check current contact mute status
+    const currentContact = await this.getContact(row.businessId, row.targetPhone);
+    const shouldUnmute = currentContact?.isMuted === true;
+
+    if (shouldUnmute) {
+      await this.unmuteContact(row.businessId, row.targetPhone);
+    } else {
+      await this.muteContact(row.businessId, row.targetPhone);
     }
 
     await this.db
@@ -140,13 +162,11 @@ export class DrizzleEligibilityRepository implements IEligibilityRepository {
       .set({ isRedeemed: true, redeemedAt: new Date() })
       .where(eq(schema.muteMagicLinks.token, token));
 
-    // Automatically mute the associated contact
-    await this.muteContact(row.businessId, row.targetPhone);
-
     return {
       success: true,
       targetPhone: row.targetPhone,
       businessId: row.businessId,
+      actionTaken: shouldUnmute ? 'unmuted' : 'muted',
     };
   }
 

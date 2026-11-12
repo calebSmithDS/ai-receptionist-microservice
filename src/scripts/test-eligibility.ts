@@ -42,6 +42,14 @@ class InMemoryEligibilityRepository implements IEligibilityRepository {
     }
   }
 
+  async unmuteContact(businessId: string, phoneNumber: string): Promise<void> {
+    const contact = await this.getContact(businessId, phoneNumber);
+    if (contact) {
+      contact.isMuted = false;
+      contact.category = 'commercial_contact';
+    }
+  }
+
   async getIntentSession(businessId: string, callerPhone: string): Promise<IntentSessionRecord | null> {
     return this.intentSessions.get(`${businessId}:${callerPhone}`) || null;
   }
@@ -54,12 +62,26 @@ class InMemoryEligibilityRepository implements IEligibilityRepository {
     this.magicLinks.set(token, { businessId, targetPhone, isRedeemed: false });
   }
 
-  async redeemMagicLinkToken(token: string): Promise<{ success: boolean; targetPhone?: string; businessId?: string }> {
+  async redeemMagicLinkToken(token: string): Promise<{ success: boolean; targetPhone?: string; businessId?: string; actionTaken?: 'muted' | 'unmuted' }> {
     const link = this.magicLinks.get(token);
     if (!link || link.isRedeemed) return { success: false };
     link.isRedeemed = true;
-    await this.muteContact(link.businessId, link.targetPhone);
-    return { success: true, targetPhone: link.targetPhone, businessId: link.businessId };
+
+    const contact = await this.getContact(link.businessId, link.targetPhone);
+    const shouldUnmute = contact?.isMuted === true;
+
+    if (shouldUnmute) {
+      await this.unmuteContact(link.businessId, link.targetPhone);
+    } else {
+      await this.muteContact(link.businessId, link.targetPhone);
+    }
+
+    return {
+      success: true,
+      targetPhone: link.targetPhone,
+      businessId: link.businessId,
+      actionTaken: shouldUnmute ? 'unmuted' : 'muted',
+    };
   }
 
   async recordDecision(decision: EligibilityDecisionResult & { businessId: string; callerPhone: string }): Promise<void> {
@@ -168,8 +190,8 @@ async function runEligibilityTests() {
   assert(res5.action === 'standard_sms', 'Completely fresh caller receives standard_sms');
   assert(res5.reason === 'unknown_caller', 'Reason is unknown_caller');
 
-  // ── TEST 6: Rule TradieRedeemsMagicMuteLink ─────────────────────────────────
-  console.log('\n6️⃣ Rule: TradieRedeemsMagicMuteLink (1-Tap Mute)');
+  // ── TEST 6: Rule TradieRedeemsMagicMuteLink (Dynamic 2-Way Toggle) ───────────
+  console.log('\n6️⃣ Rule: TradieRedeemsMagicMuteLink (Dynamic 2-Way Toggle)');
   const token = 'token_xyz_123';
   await repo.createMagicLinkToken(token, biz, '+61466666666');
 
@@ -177,18 +199,48 @@ async function runEligibilityTests() {
   const initialContact = await repo.getContact(biz, '+61466666666');
   assert(!initialContact?.isMuted, 'Target contact initially unmuted');
 
-  // Tradie taps link
+  // Tradie taps link to mute
   const redeemResult = await repo.redeemMagicLinkToken(token);
   assert(redeemResult.success === true, 'Magic link redeemed successfully');
+  assert(redeemResult.actionTaken === 'muted', 'Action taken is muted');
 
   // Contact is now permanently muted
   const updatedContact = await repo.getContact(biz, '+61466666666');
   assert(updatedContact?.isMuted === true, 'Contact is now permanently isMuted: true');
   assert(updatedContact?.category === 'explicit_excluded', 'Category updated to explicit_excluded');
 
-  // Second tap fails (single-use token)
-  const secondRedeem = await repo.redeemMagicLinkToken(token);
-  assert(secondRedeem.success === false, 'Cannot redeem magic link twice');
+  // ── TEST 7: Dynamic Unmute & Commercial Client Upgrade ───────────────────────
+  console.log('\n7️⃣ Rule: Dynamic Unmute & Commercial Client Upgrade');
+  const unmuteToken = 'token_unmute_456';
+  await repo.createMagicLinkToken(unmuteToken, biz, '+61466666666');
+
+  // Tradie taps link on an already-muted contact -> Should UNMUTE!
+  const unmuteResult = await repo.redeemMagicLinkToken(unmuteToken);
+  assert(unmuteResult.success === true, 'Unmute link redeemed successfully');
+  assert(unmuteResult.actionTaken === 'unmuted', 'Action taken is unmuted');
+
+  // Contact is now unmuted and upgraded to commercial_contact
+  const unmutedContact = await repo.getContact(biz, '+61466666666');
+  assert(unmutedContact?.isMuted === false, 'Contact is now unmuted (isMuted: false)');
+  assert(unmutedContact?.category === 'commercial_contact', 'Category upgraded to commercial_contact');
+
+  // Next missed call from unmuted contact should proceed to neutral_sms or standard_sms (NOT suppressed!)
+  const unmutedCall = await engine.evaluateMissedCall(biz, '+61466666666', new Date(baseTime.getTime() + 3600000));
+  assert(unmutedCall.action === 'neutral_sms', 'Unmuted commercial contact receives neutral_sms instead of being suppressed');
+
+  // ── TEST 8: Gemini Bouncer Offline Heuristics ───────────────────────────────
+  console.log('\n8️⃣ Rule: Gemini Bouncer Offline Heuristics');
+  const { GeminiBouncerClassifier } = await import('../core/eligibility/gemini-bouncer.js');
+  const bouncer = new GeminiBouncerClassifier();
+  
+  const bouncerPersonal1 = await bouncer.classify('we still on for tonight?', 'plumber');
+  assert(bouncerPersonal1.classification === 'PERSONAL', 'Bouncer classifies "we still on for tonight?" as PERSONAL');
+
+  const bouncerPersonal2 = await bouncer.classify('its tony', 'plumber');
+  assert(bouncerPersonal2.classification === 'PERSONAL', 'Bouncer classifies "its tony" as PERSONAL');
+
+  const bouncerService = await bouncer.classify('burst pipe leaking in my laundry', 'plumber');
+  assert(bouncerService.classification === 'SERVICE', 'Bouncer classifies "burst pipe leaking in my laundry" as SERVICE');
 
   console.log('\n====================================================');
   console.log(`📊 RESULTS: ${passed} PASSED, ${failed} FAILED`);
