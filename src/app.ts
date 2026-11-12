@@ -136,3 +136,6 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   return app;
 }
 
+export default buildApp;
+
+
