@@ -250,21 +250,10 @@ Previously collected: ${JSON.stringify(input.previouslyCollected)}
     const { tenant } = input;
     const tradieName = tenant.ownerFirstName || tenant.businessName;
 
-    // ── Local dev mock (no Gemini API key) ────────────────────────────────────
+    // ── Local dev / CI mock (no Gemini API key) ─────────────────────────────
     if (!this.ai) {
-      console.warn('[GeminiEvaluator] GEMINI_API_KEY not set. Using mock evaluation.');
-      return {
-        intent: 'customer_lead',
-        isFullyQualified: true,
-        extracted: {
-          customerName: 'Customer',
-          suburb: 'Local Area',
-          issue: input.latestMessage,
-          urgency: 'MEDIUM' as LeadUrgency,
-          intent: 'customer_lead',
-        },
-        replyText: `Thanks! We've received your request and the team at ${tenant.businessName} will be in touch shortly.`,
-      };
+      console.warn('[GeminiEvaluator] GEMINI_API_KEY not set. Using offline rule-based fallback.');
+      return this.evaluateOffline(input);
     }
 
     const systemInstruction = this.buildSystemInstruction(input);
@@ -329,74 +318,79 @@ Previously collected: ${JSON.stringify(input.previouslyCollected)}
       };
     } catch (error) {
       console.warn('[GeminiEvaluator] Network error. Using offline rule-based fallback.');
+      return this.evaluateOffline(input);
+    }
+  }
 
-      // ── Offline simulation (CI / no-network) ─────────────────────────────
-      const textLower = (input.latestMessage + ' ' + input.history.map((h) => h.content).join(' ')).toLowerCase();
+  private evaluateOffline(input: EvaluationInput): EvaluationOutput {
+    const { tenant } = input;
+    const tradieName = tenant.ownerFirstName || tenant.businessName;
 
-      if (textLower.includes('seo') || textLower.includes('marketing') || textLower.includes('we can get you more leads')) {
-        return { intent: 'spam', isFullyQualified: false, extracted: { intent: 'spam' }, replyText: undefined };
-      }
+    const textLower = (input.latestMessage + ' ' + input.history.map((h) => h.content).join(' ')).toLowerCase();
 
-      if (textLower.includes('gas') || textLower.includes('sparking') || textLower.includes('live wire')) {
-        return {
-          intent: 'customer_lead',
-          isFullyQualified: false,
-          isEscalated: true,
-          escalationReason: 'DANGER_HAZARD',
-          extracted: {},
-          replyText: `Please get to safety immediately. For your safety, please isolate the issue if safe to do so, or contact 000 / your utility provider immediately. I have notified ${tradieName} directly.`,
-        };
-      }
+    if (textLower.includes('seo') || textLower.includes('marketing') || textLower.includes('we can get you more leads')) {
+      return { intent: 'spam', isFullyQualified: false, extracted: { intent: 'spam' }, replyText: undefined };
+    }
 
-      if (textLower.includes('how much') || textLower.includes('cost') || textLower.includes('price') || textLower.includes('charge') || textLower.includes('ballpark')) {
-        return {
-          intent: 'customer_lead',
-          isFullyQualified: false,
-          extracted: {},
-          replyText: `Totally understand you want a rough idea. ${tradieName} provides an upfront quote once he can see it on-site to inspect the job properly. What suburb are you located in?`,
-        };
-      }
-
-      if (textLower.includes('human') || textLower.includes('angry') || textLower.includes('furious')) {
-        return {
-          intent: 'customer_lead',
-          isFullyQualified: false,
-          isEscalated: true,
-          escalationReason: textLower.includes('human') ? 'HUMAN_REQUEST' : 'ANGER',
-          extracted: {},
-          replyText: 'No problem — I have flagged this for the team lead directly.',
-        };
-      }
-
-      const textCombined = (input.latestMessage + ' ' + input.history.map((h) => h.content).join(' ')).toLowerCase();
-      const hasSuburb = /maroubra|coogee|bondi|clovelly|rose park|glenelg/.test(textCombined);
-      const hasIssue = /drain|pipe|leak|flood|burst|tap|hot water|gas/.test(textCombined);
-      const hasUrgency = /urgent|emergency|overflow|flood|right now|burst/.test(textCombined);
-      const nameMatch = textCombined.match(/(?:name is|i'm|i am|call me)\s+([a-z]+)/i);
-      const customerName = nameMatch
-        ? nameMatch[1].charAt(0).toUpperCase() + nameMatch[1].slice(1)
-        : undefined;
-
-      const isFullyQualified = !!(hasSuburb && hasIssue && hasUrgency && customerName);
-
-      // Distinguish current turn progress: if latest message contains no meaningful job details, don't re-extract previous details
-      const latestLower = input.latestMessage.toLowerCase();
-      const latestHasInfo = /maroubra|coogee|bondi|clovelly|rose park|glenelg|drain|pipe|leak|flood|burst|tap|hot water|gas|urgent|emergency|overflow|right now|name is|i'm|i am|call me/.test(latestLower);
-
+    if (textLower.includes('gas') || textLower.includes('sparking') || textLower.includes('live wire')) {
       return {
         intent: 'customer_lead',
-        isFullyQualified,
-        extracted: {
-          suburb: latestHasInfo && hasSuburb ? 'Maroubra' : undefined,
-          issue: latestHasInfo && hasIssue ? 'Plumbing issue' : undefined,
-          urgency: latestHasInfo && hasUrgency ? 'HIGH' : undefined,
-          customerName: latestHasInfo ? customerName : undefined,
-          intent: 'customer_lead',
-        },
-        replyText: isFullyQualified
-          ? undefined
-          : "Got it! Who am I speaking with, and what suburb are you in?",
+        isFullyQualified: false,
+        isEscalated: true,
+        escalationReason: 'DANGER_HAZARD',
+        extracted: {},
+        replyText: `Please get to safety immediately. For your safety, please isolate the issue if safe to do so, or contact 000 / your utility provider immediately. I have notified ${tradieName} directly.`,
       };
     }
+
+    if (textLower.includes('how much') || textLower.includes('cost') || textLower.includes('price') || textLower.includes('charge') || textLower.includes('ballpark')) {
+      return {
+        intent: 'customer_lead',
+        isFullyQualified: false,
+        extracted: {},
+        replyText: `Totally understand you want a rough idea. ${tradieName} provides an upfront quote once he can see it on-site to inspect the job properly. What suburb are you located in?`,
+      };
+    }
+
+    if (textLower.includes('human') || textLower.includes('angry') || textLower.includes('furious')) {
+      return {
+        intent: 'customer_lead',
+        isFullyQualified: false,
+        isEscalated: true,
+        escalationReason: textLower.includes('human') ? 'HUMAN_REQUEST' : 'ANGER',
+        extracted: {},
+        replyText: 'No problem — I have flagged this for the team lead directly.',
+      };
+    }
+
+    const textCombined = (input.latestMessage + ' ' + input.history.map((h) => h.content).join(' ')).toLowerCase();
+    const hasSuburb = /maroubra|coogee|bondi|clovelly|rose park|glenelg/.test(textCombined);
+    const hasIssue = /drain|pipe|leak|flood|burst|tap|hot water|gas/.test(textCombined);
+    const hasUrgency = /urgent|emergency|overflow|flood|right now|burst/.test(textCombined);
+    const nameMatch = textCombined.match(/(?:name is|i'm|i am|call me)\s+([a-z]+)/i);
+    const customerName = nameMatch
+      ? nameMatch[1].charAt(0).toUpperCase() + nameMatch[1].slice(1)
+      : undefined;
+
+    const isFullyQualified = !!(hasSuburb && hasIssue && hasUrgency && customerName);
+
+    // Distinguish current turn progress: if latest message contains no meaningful job details, don't re-extract previous details
+    const latestLower = input.latestMessage.toLowerCase();
+    const latestHasInfo = /maroubra|coogee|bondi|clovelly|rose park|glenelg|drain|pipe|leak|flood|burst|tap|hot water|gas|urgent|emergency|overflow|right now|name is|i'm|i am|call me/.test(latestLower);
+
+    return {
+      intent: 'customer_lead',
+      isFullyQualified,
+      extracted: {
+        suburb: latestHasInfo && hasSuburb ? 'Maroubra' : undefined,
+        issue: latestHasInfo && hasIssue ? 'Plumbing issue' : undefined,
+        urgency: latestHasInfo && hasUrgency ? 'HIGH' : undefined,
+        customerName: latestHasInfo ? customerName : undefined,
+        intent: 'customer_lead',
+      },
+      replyText: isFullyQualified
+        ? undefined
+        : "Got it! Who am I speaking with, and what suburb are you in?",
+    };
   }
 }
