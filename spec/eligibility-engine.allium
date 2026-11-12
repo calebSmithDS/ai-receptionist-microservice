@@ -203,19 +203,34 @@ rule BouncerClassifiesTradeServiceReply {
 }
 
 --------------------------------------------------------------------------------
--- 4. FRICTIONLESS TRADIE CONTROLS (1-TAP MAGIC LINK ONLY)
+-- 4. FRICTIONLESS TRADIE CONTROLS (DYNAMIC 2-WAY MAGIC LINK)
 --------------------------------------------------------------------------------
 
-rule TradieRedeemsMagicMuteLink {
+rule TradieRedeemsMagicLinkMute {
   when: TradieTapsMagicLink(token)
   requires:
     MuteMagicLink.token = token and
-    MuteMagicLink.is_redeemed = false
+    MuteMagicLink.is_redeemed = false and
+    target_contact = ContactProfile.lookup(MuteMagicLink.target_phone) and
+    target_contact.is_muted = false
   ensures:
     MuteMagicLink.is_redeemed = true
-    target_contact = ContactProfile.lookup(MuteMagicLink.target_phone)
     target_contact.is_muted = true
     target_contact.category = explicit_excluded
     Browser.render_page(status: "Contact Muted", target: target_contact.phone_number)
+}
+
+rule TradieRedeemsMagicLinkUnmute {
+  when: TradieTapsMagicLink(token)
+  requires:
+    MuteMagicLink.token = token and
+    MuteMagicLink.is_redeemed = false and
+    target_contact = ContactProfile.lookup(MuteMagicLink.target_phone) and
+    target_contact.is_muted = true
+  ensures:
+    MuteMagicLink.is_redeemed = true
+    target_contact.is_muted = false
+    target_contact.category = commercial_contact  -- Upgraded to commercial contact to prevent auto-mute in future
+    Browser.render_page(status: "Contact Unmuted", target: target_contact.phone_number)
 }
 
