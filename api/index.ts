@@ -28,18 +28,8 @@ export default async function handler(
   req: IncomingMessage,
   res: ServerResponse
 ): Promise<void> {
+  console.log(`[Vercel Ingress] ${req.method} ${req.url} (rawHeaders host: ${req.headers.host})`);
   const fastify = await getApp();
-
-  return new Promise<void>((resolve, reject) => {
-    res.on('finish', () => resolve());
-    res.on('close', () => resolve());
-    res.on('error', (err) => reject(err));
-
-    try {
-      fastify.server.emit('request', req, res);
-    } catch (err) {
-      reject(err);
-    }
-  });
+  fastify.server.emit('request', req, res);
 }
 
