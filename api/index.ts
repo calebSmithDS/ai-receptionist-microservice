@@ -29,6 +29,17 @@ export default async function handler(
   res: ServerResponse
 ): Promise<void> {
   const fastify = await getApp();
-  fastify.server.emit('request', req, res);
+
+  return new Promise<void>((resolve, reject) => {
+    res.on('finish', () => resolve());
+    res.on('close', () => resolve());
+    res.on('error', (err) => reject(err));
+
+    try {
+      fastify.server.emit('request', req, res);
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
 
