@@ -10,10 +10,10 @@ entity ContactProfile {
   business_id: String
   phone_number: String
   category: unknown_caller | single_first_name | commercial_contact | explicit_excluded | opted_out
-  display_name: String
+  display_name: String?
   is_muted: Boolean
-  last_interaction_at: Timestamp
-  last_missed_call_at: Timestamp
+  last_interaction_at: Timestamp?
+  last_missed_call_at: Timestamp?
   created_at: Timestamp
 
   transitions category {
@@ -75,7 +75,6 @@ entity EligibilityDecision {
     opted_out |
     duplicate_call_window |
     recent_sms_window |
-    recent_callback_detected |
     known_contact_uncertain |
     unknown_caller
   evaluated_at: Timestamp
@@ -122,15 +121,17 @@ rule DispatchNeutralSmsForUncertainContact {
   requires:
     contact.is_muted = false and
     contact.category in {single_first_name, commercial_contact} and
-    (now - contact.last_missed_call_at) >= 15m and
+    (contact.last_missed_call_at == null or (now - contact.last_missed_call_at) >= 15m) and
     (contact.last_interaction_at == null or (now - contact.last_interaction_at) >= 4h)
   ensures:
+    contact.last_missed_call_at = now
     EligibilityDecision.action = neutral_sms
     EligibilityDecision.reason = "known_contact_uncertain"
     SMS.sent(to: caller_phone, body: "G'day, you've reached [Tradie]'s business. He's tied up at the moment, but I can pass on a message or help with a work enquiry. What can I help with?")
     IntentSession.status = awaiting_intent
     IntentSession.caller_phone = caller_phone
     IntentSession.neutral_sms_sent_at = now
+    MuteMagicLink.token = generate_token()
 }
 
 rule DispatchStandardSmsForUnknownCaller {
@@ -141,37 +142,26 @@ rule DispatchStandardSmsForUnknownCaller {
     (contact.last_missed_call_at == null or (now - contact.last_missed_call_at) >= 15m) and
     (contact.last_interaction_at == null or (now - contact.last_interaction_at) >= 4h)
   ensures:
+    contact.last_missed_call_at = now
     EligibilityDecision.action = standard_sms
     EligibilityDecision.reason = "unknown_caller"
     AIReceptionist.start_qualification(business_id, caller_phone)
 }
 
 --------------------------------------------------------------------------------
--- 3. THE BOUNCER CLASSIFIER (RESOLVING AWAITING_INTENT VIA DEBOUNCER)
+-- 3. THE BOUNCER CLASSIFIER (RESOLVING AWAITING_INTENT VIA UPSTREAM INGRESS BURST)
 --------------------------------------------------------------------------------
 
-rule BufferNeutralReplyFragment {
-  when: CustomerSendsSms(caller_phone, text)
-  requires: 
-    IntentSession.caller_phone = caller_phone and
-    IntentSession.status = awaiting_intent and
-    text.length > 0
-  ensures:
-    MessageBuffer.version = MessageBuffer.version + 1
-    MessageBuffer.pending_messages.contains(text)
-    Timer.scheduled(delay: 10s, token: MessageBuffer.version)
-}
+-- Note: Inbound message buffering & debouncing are canonically handled upstream by the
+-- Ingress Buffer layer (tradie-ai-receptionist.allium). The bouncer consumes drained bursts.
 
 rule BouncerClassifiesPersonalReply {
-  when: DebounceTimerFires(business_id, caller_phone, token)
+  when: InboundDebouncedBurst(business_id, caller_phone, full_text)
   requires:
-    token = MessageBuffer.version and
     IntentSession.caller_phone = caller_phone and
     IntentSession.status = awaiting_intent and
-    Classifier.classify(join(MessageBuffer.pending_messages, "\n")) = "PERSONAL"
+    Classifier.classify(full_text) = "PERSONAL"
   ensures:
-    full_text = join(MessageBuffer.pending_messages, "\n")
-    MessageBuffer.pending_messages = empty
     IntentSession.status = resolved_personal
     IntentSession.incoming_reply_text = full_text
     IntentSession.classification_result = personal
@@ -187,15 +177,12 @@ rule BouncerClassifiesPersonalReply {
 }
 
 rule BouncerClassifiesTradeServiceReply {
-  when: DebounceTimerFires(business_id, caller_phone, token)
+  when: InboundDebouncedBurst(business_id, caller_phone, full_text)
   requires:
-    token = MessageBuffer.version and
     IntentSession.caller_phone = caller_phone and
     IntentSession.status = awaiting_intent and
-    Classifier.classify(join(MessageBuffer.pending_messages, "\n")) = "SERVICE"
+    Classifier.classify(full_text) = "SERVICE"
   ensures:
-    full_text = join(MessageBuffer.pending_messages, "\n")
-    MessageBuffer.pending_messages = empty
     IntentSession.status = resolved_service
     IntentSession.incoming_reply_text = full_text
     IntentSession.classification_result = service
@@ -233,4 +220,3 @@ rule TradieRedeemsMagicLinkUnmute {
     target_contact.category = commercial_contact  -- Upgraded to commercial contact to prevent auto-mute in future
     Browser.render_page(status: "Contact Unmuted", target: target_contact.phone_number)
 }
-

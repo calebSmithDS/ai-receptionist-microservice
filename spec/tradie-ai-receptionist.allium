@@ -1,6 +1,6 @@
 -- allium: 3
 -- System Intent: Australian Tradie AI Receptionist Microservice
--- Architecture: Deterministic FSM + Debounced Burst Ingestion + LLM Qualification + CRM Lead Dispatch
+-- Architecture: Deterministic FSM + Debounced Burst Ingestion + LLM Qualification (w/ Heuristic Fallback) + CRM Lead Dispatch
 
 --------------------------------------------------------------------------------
 -- 1. ENTITIES & LIFECYCLES
@@ -8,8 +8,8 @@
 
 entity CustomerSession {
   business_id: String
-  customer_phone: String
-  status: init | awaiting_reply | qualifying | completed | escalated | terminated | abandoned
+  customer_phone: String  -- alias: caller_number in Redis/Zod contract
+  status: INIT | AWAITING_REPLY | QUALIFYING | COMPLETED | ESCALATED | TERMINATED | ABANDONED
   
   -- Anti-Loop Counters
   user_message_count: Integer
@@ -17,25 +17,25 @@ entity CustomerSession {
   stall_count: Integer
 
   -- State-Dependent Collected Data
-  customer_name: String when status in {qualifying, completed, escalated}
-  suburb: String when status in {qualifying, completed, escalated}
-  issue: String when status in {qualifying, completed, escalated}
-  urgency: low | medium | high | emergency when status in {qualifying, completed, escalated}
-  escalation_reason: danger_hazard | anger | human_request | out_of_bounds when status = escalated
+  customer_name: String when status in {QUALIFYING, COMPLETED, ESCALATED}
+  suburb: String when status in {QUALIFYING, COMPLETED, ESCALATED}
+  issue: String when status in {QUALIFYING, COMPLETED, ESCALATED}
+  urgency: LOW | MEDIUM | HIGH | EMERGENCY when status in {QUALIFYING, COMPLETED, ESCALATED}
+  escalation_reason: DANGER_HAZARD | ANGER | HUMAN_REQUEST | OUT_OF_BOUNDS | MAX_TURNS_EXCEEDED | UNKNOWN when status = ESCALATED
 
   -- Deterministic Transition Graph (δ: Q × Σ → Q' × Ω)
   transitions status {
-    init -> awaiting_reply
-    awaiting_reply -> qualifying
-    awaiting_reply -> terminated
-    qualifying -> qualifying
-    qualifying -> completed
-    qualifying -> escalated
-    qualifying -> terminated
-    qualifying -> abandoned
-    completed -> completed
-    escalated -> escalated
-    terminal: terminated, abandoned
+    INIT -> AWAITING_REPLY
+    AWAITING_REPLY -> QUALIFYING
+    AWAITING_REPLY -> TERMINATED
+    QUALIFYING -> QUALIFYING
+    QUALIFYING -> COMPLETED
+    QUALIFYING -> ESCALATED
+    QUALIFYING -> TERMINATED
+    QUALIFYING -> ABANDONED
+    COMPLETED -> COMPLETED
+    ESCALATED -> ESCALATED
+    terminal: TERMINATED, ABANDONED
   }
 
   -- Invariants
@@ -44,7 +44,7 @@ entity CustomerSession {
   }
 
   invariant CompletedHasMinimumData {
-    if this.status = completed then
+    if this.status = COMPLETED then
       this.customer_name != null and
       this.suburb != null and
       this.issue != null
@@ -52,10 +52,13 @@ entity CustomerSession {
 }
 
 entity MessageBuffer {
+  -- Canonical upstream Ingress Buffer
   business_id: String
   customer_phone: String
   version: Integer
   pending_messages: List<String>
+  media_urls: List<String>
+  received_at: Timestamp
   expires_in_seconds: Integer
 
   invariant PositiveVersion {
@@ -64,15 +67,17 @@ entity MessageBuffer {
 }
 
 --------------------------------------------------------------------------------
--- 2. RULES: INGESTION & DEBOUNCING (TEL-05)
+-- 2. RULES: INGESTION & DEBOUNCING (CANONICAL UPSTREAM INGRESS BUFFER)
 --------------------------------------------------------------------------------
 
 rule BufferInboundFragment {
-  when: CustomerSendsSms(business_id, phone, text)
-  requires: text.length > 0
+  when: CustomerSendsSms(business_id, phone, text, media_urls)
+  requires: text.length > 0 or media_urls.count > 0
   ensures:
     MessageBuffer.version = MessageBuffer.version + 1
     MessageBuffer.pending_messages.contains(text)
+    MessageBuffer.media_urls.contains_all(media_urls)
+    MessageBuffer.received_at = now
     Timer.scheduled(delay: 10s, token: MessageBuffer.version)
 }
 
@@ -80,9 +85,11 @@ rule DrainBufferOnLatestTimer {
   when: DebounceTimerFires(business_id, phone, token)
   requires: token = MessageBuffer.version
   ensures:
-    Evaluator.prompt = join(MessageBuffer.pending_messages, "\n")
+    full_text = join(MessageBuffer.pending_messages, "\n")
+    all_media = MessageBuffer.media_urls
     MessageBuffer.pending_messages = empty
-    DispatchToEvaluation(business_id, phone, Evaluator.prompt)
+    MessageBuffer.media_urls = empty
+    DispatchInboundBurst(business_id, phone, full_text)
 }
 
 rule IgnoreStaleDebounceTimer {
@@ -99,54 +106,88 @@ rule IgnoreStaleDebounceTimer {
 rule InterceptMissedCall {
   when: CallMissed(business_id, caller_phone)
   ensures:
-    CustomerSession.status = init
+    CustomerSession.status = INIT
     CustomerSession.user_message_count = 0
     Timer.scheduled(delay: 30s, job: "DispatchGreeting")
 }
 
 rule SendGreetingSms {
   when: GreetingTimerFires(session)
-  requires: session.status = init
+  requires: session.status = INIT
   ensures:
-    session.status = awaiting_reply
-    SMS.sent(to: session.customer_phone, body: GreetingText)
+    session.status = AWAITING_REPLY
+    SMS.sent(
+      to: session.customer_phone,
+      body: "Hi, this is " + tradie_name + "'s assistant. He's on the tools right now. How can we help you today?"
+    )
 }
 
 --------------------------------------------------------------------------------
 -- 4. RULES: CONVERSATION LOOP & QUALIFICATION (FSM-01 -> FSM-03)
 --------------------------------------------------------------------------------
 
-rule StartQualifyingOnReply {
-  when: DispatchToEvaluation(business_id, phone, prompt)
-  requires: session.status = awaiting_reply
+rule BouncerServiceHandoff {
+  when: InboundDebouncedBurst(business_id, phone, full_text)
+  requires:
+    IntentSession.status = resolved_service and
+    session.status = INIT
   ensures:
-    session.status = qualifying
+    -- Bypasses 30-second greeting since contact already replied to neutral SMS
+    session.status = QUALIFYING
     session.user_message_count = 1
+    session.stall_count = 0
+    DispatchToEvaluation(business_id, phone, full_text)
+}
+
+rule StartQualifyingOnReply {
+  when: DispatchInboundBurst(business_id, phone, full_text)
+  requires: session.status = AWAITING_REPLY
+  ensures:
+    session.status = QUALIFYING
+    session.user_message_count = 1
+    DispatchToEvaluation(business_id, phone, full_text)
+}
+
+rule EvaluateInboundWithGeminiOrOfflineFallback {
+  when: DispatchToEvaluation(business_id, phone, full_text)
+  requires: session.status = QUALIFYING
+  ensures:
+    if LLM.is_available then
+      QualificationEvaluated(session, Gemini.evaluate(full_text))
+    else
+      -- Deterministic heuristic fallback when Gemini API is unavailable or unconfigured
+      QualificationEvaluated(session, OfflineHeuristics.evaluate(full_text))
 }
 
 rule StepQualification {
   when: QualificationEvaluated(session, extracted, is_fully_qualified)
-  requires: session.status = qualifying and is_fully_qualified = false
+  requires: session.status = QUALIFYING and is_fully_qualified = false
   ensures:
-    session.status = qualifying
+    session.status = QUALIFYING
     session.customer_name = coalesce(extracted.name, session.customer_name)
     session.suburb = coalesce(extracted.suburb, session.suburb)
     session.issue = coalesce(extracted.issue, session.issue)
     session.urgency = coalesce(extracted.urgency, session.urgency)
+    -- Reset stall counter if progress was made on qualification fields
+    if (extracted.name != null or extracted.suburb != null or extracted.issue != null or extracted.urgency != null) then
+      session.stall_count = 0
+    else
+      session.stall_count = session.stall_count + 1
     SMS.sent(to: session.customer_phone, body: extracted.follow_up_question)
 }
 
 rule CompleteQualification {
   when: QualificationEvaluated(session, extracted, is_fully_qualified)
   requires: 
-    session.status = qualifying and
+    session.status = QUALIFYING and
     is_fully_qualified = true
   ensures:
-    session.status = completed
+    session.status = COMPLETED
     session.customer_name = coalesce(extracted.name, session.customer_name)
     session.suburb = coalesce(extracted.suburb, session.suburb)
     session.issue = coalesce(extracted.issue, session.issue)
     Lead.dispatched_to_crm(system: "ServiceM8", data: session)
+    SMS.sent(to: Owner.phone, alert: "New Lead Dispatched", data: session)
     SMS.sent(to: session.customer_phone, framing: "on_site_inspection_quote")
 }
 
@@ -156,19 +197,26 @@ rule CompleteQualification {
 
 rule DetectSpamSilently {
   when: InboundClassifiedAsSpam(session)
-  requires: session.status in {awaiting_reply, qualifying}
+  requires: session.status in {AWAITING_REPLY, QUALIFYING}
   ensures:
-    session.status = terminated
+    session.status = TERMINATED
     SMS.outbound_count = 0  -- $0 cost gate
 }
 
 rule EscalateImmediateHazardOrHumanRequest {
   when: HazardOrEscalationDetected(session, reason)
-  requires: session.status in {awaiting_reply, qualifying}
+  requires: session.status in {AWAITING_REPLY, QUALIFYING}
   ensures:
-    session.status = escalated
+    session.status = ESCALATED
     session.escalation_reason = reason
-    SMS.sent(to: Owner.phone, alert: "Escalation Alert", details: session)
+    MuteMagicLink.token = generate_token()
+    SMS.sent(
+      to: Owner.phone,
+      alert: "Escalation Alert",
+      details: session,
+      action: "Contact customer immediately",
+      magic_link: MuteMagicLink.url
+    )
     SMS.sent(to: session.customer_phone, body: "Passed to team lead directly")
 }
 
@@ -178,17 +226,17 @@ rule EscalateImmediateHazardOrHumanRequest {
 
 rule SendUltimatumOnFourthStall {
   when: StalledTurnEvaluated(session)
-  requires: session.status = qualifying and session.stall_count = 3
+  requires: session.status = QUALIFYING and session.stall_count = 3
   ensures:
-    session.status = qualifying
+    session.status = QUALIFYING
     SMS.sent(to: session.customer_phone, type: "Ultimatum")
 }
 
 rule AbandonSessionOnFifthStall {
   when: StalledTurnEvaluated(session)
-  requires: session.status = qualifying and session.stall_count >= 4
+  requires: session.status = QUALIFYING and session.stall_count >= 4
   ensures:
-    session.status = abandoned
+    session.status = ABANDONED
     Session.dropped_silently = true
 }
 
@@ -198,10 +246,9 @@ rule AbandonSessionOnFifthStall {
 
 rule ForwardCustomerFollowUpToOwner {
   when: CustomerSendsSms(business_id, phone, text)
-  requires: session.status in {completed, escalated}
+  requires: session.status in {COMPLETED, ESCALATED}
   ensures:
     session.status = session.status  -- remains in latching state
     SMS.sent(to: Owner.phone, body: text, header: "Follow-up")
     Bot.replies_to_customer = false  -- bot maintains radio silence
 }
-
