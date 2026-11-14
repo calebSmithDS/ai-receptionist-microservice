@@ -243,15 +243,7 @@ export async function processMessageEvent(
 
         if (classification.classification === 'PERSONAL') {
           // Rule BouncerClassifiesPersonalReply:
-          // 1. Mark intent session as resolved_personal (session-level silence)
-          await eligibilityEngine.repo.saveIntentSession({
-            ...intentSession,
-            status: 'resolved_personal',
-            incomingReplyText: body,
-            classificationResult: 'personal',
-          });
-
-          // 2. Generate 1-Tap Magic Mute confirmation token (allows tradie to permanently mute contact forever)
+          // 1. Generate 1-Tap Magic Mute confirmation token (allows tradie to permanently mute contact forever)
           let muteUrl: string | undefined;
           try {
             const token = Math.random().toString(36).substring(2, 10);
@@ -261,16 +253,37 @@ export async function processMessageEvent(
             logger.warn({ err: e.message }, 'Failed to create magic mute link on personal reply');
           }
 
-          // 3. Forward text directly to Tradie mobile with permanent mute option
+          // 2. Fetch contact info and forward SMS to Tradie mobile BEFORE committing irreversible DB state
           const contact = await eligibilityEngine.repo.getContact(businessId, callerNumber);
           const contactName = contact?.displayName || callerNumber;
-          await twilio.sendSms({
+          const smsResult = await twilio.sendSms({
             from: dialedNumber,
             to: ownerPhone,
             body: `[Personal Chat from ${contactName}]: "${body}"\n\n🛡️ Bot silenced for this chat.\nNever want bot to text them? Tap to Mute Forever: ${muteUrl || 'N/A'}`,
           });
 
-          // Explicitly enter terminal TERMINATED state to silence future bot interactions
+          // Distributed Boundary Guard: If Twilio delivery fails, fail fast so QStash retries cleanly
+          // without leaving partial, silent-drop DB state in Postgres.
+          if (!smsResult.success) {
+            logger.error({ callerNumber, ownerPhone }, 'Twilio SMS forward to owner failed for personal chat — aborting for retry');
+            return {
+              statusCode: 500,
+              data: {
+                error: 'Failed to forward personal SMS to owner via Twilio',
+                retryable: true,
+              },
+            };
+          }
+
+          // 3. Mark intent session as resolved_personal in Postgres once external notification succeeds
+          await eligibilityEngine.repo.saveIntentSession({
+            ...intentSession,
+            status: 'resolved_personal',
+            incomingReplyText: body,
+            classificationResult: 'personal',
+          });
+
+          // 4. Explicitly enter terminal TERMINATED state to silence future bot interactions in Redis session
           session.status = 'TERMINATED';
           session.history.push({
             role: 'customer',
