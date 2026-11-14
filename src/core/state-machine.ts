@@ -60,6 +60,22 @@ type TransitionRule<TEvent extends MachineEvent = MachineEvent> = (
   event: TEvent
 ) => { target: SessionStatus; actions: MachineAction[]; updatedState?: Partial<SessionState> };
 
+/** Shared handler for ESCALATION_DETECTED transitions (from AWAITING_REPLY or QUALIFYING) */
+const handleEscalationDetected: TransitionRule<Extract<MachineEvent, { type: 'ESCALATION_DETECTED' }>> = (
+  _state,
+  event
+) => ({
+  target: 'ESCALATED',
+  actions: [{ type: 'ALERT_OWNER_ESCALATION', reason: event.reason, notes: event.notes }],
+  updatedState: {
+    escalation: {
+      reason: event.reason,
+      detectedAt: new Date().toISOString(),
+      notes: event.notes,
+    },
+  },
+});
+
 /**
  * Transition Table (δ: Q × Σ → Q' × Ω)
  *
@@ -117,6 +133,8 @@ export const TRANSITION_TABLE: {
       target: 'TERMINATED',
       actions: [{ type: 'TERMINATE_SILENTLY' }],
     }),
+
+    ESCALATION_DETECTED: handleEscalationDetected,
   },
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -172,17 +190,7 @@ export const TRANSITION_TABLE: {
       };
     },
 
-    ESCALATION_DETECTED: (state, event) => ({
-      target: 'ESCALATED',
-      actions: [{ type: 'ALERT_OWNER_ESCALATION', reason: event.reason, notes: event.notes }],
-      updatedState: {
-        escalation: {
-          reason: event.reason,
-          detectedAt: new Date().toISOString(),
-          notes: event.notes,
-        },
-      },
-    }),
+    ESCALATION_DETECTED: handleEscalationDetected,
 
     SPAM_DETECTED: () => ({
       target: 'TERMINATED',
