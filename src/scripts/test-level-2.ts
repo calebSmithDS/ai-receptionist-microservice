@@ -488,7 +488,7 @@ async function runLevel2ScenarioTests() {
   const s9NeutralBody = JSON.parse(s9NeutralRes.body);
   assert(s9NeutralBody.status === 'neutral_sms_dispatched', 'Eligibility: Dispatches neutral SMS');
   assert(sentMessages.length === 1, 'Eligibility: Sends exactly one neutral SMS');
-  assert(sentMessages[0].body.includes("missed your call, what's up"), 'Eligibility: Dispatches casual check-in body');
+  assert(sentMessages[0].body.includes("tied up at the moment"), 'Eligibility: Dispatches neutral check-in body');
 
   // 3. Repeat call 2 minutes later -> Duplicate call suppression
   sentMessages.length = 0;
