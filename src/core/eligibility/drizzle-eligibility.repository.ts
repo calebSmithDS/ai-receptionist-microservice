@@ -137,37 +137,59 @@ export class DrizzleEligibilityRepository implements IEligibilityRepository {
   }
 
   async redeemMagicLinkToken(token: string): Promise<{ success: boolean; targetPhone?: string; businessId?: string; actionTaken?: 'muted' | 'unmuted' }> {
-    const [row] = await this.db
-      .select()
-      .from(schema.muteMagicLinks)
-      .where(eq(schema.muteMagicLinks.token, token))
-      .limit(1);
+    return await this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(schema.muteMagicLinks)
+        .where(eq(schema.muteMagicLinks.token, token))
+        .limit(1);
 
-    if (!row) {
-      return { success: false };
-    }
+      if (!row || row.isRedeemed) {
+        return { success: false };
+      }
 
-    // Dynamic 2-Way Toggle: Check current contact mute status
-    const currentContact = await this.getContact(row.businessId, row.targetPhone);
-    const shouldUnmute = currentContact?.isMuted === true;
+      // Dynamic 2-Way Toggle: Check current contact mute status
+      const contactId = `${row.businessId}:${row.targetPhone}`;
+      const [currentContact] = await tx
+        .select()
+        .from(schema.contacts)
+        .where(eq(schema.contacts.id, contactId))
+        .limit(1);
 
-    if (shouldUnmute) {
-      await this.unmuteContact(row.businessId, row.targetPhone);
-    } else {
-      await this.muteContact(row.businessId, row.targetPhone);
-    }
+      const shouldUnmute = currentContact?.isMuted === true;
 
-    await this.db
-      .update(schema.muteMagicLinks)
-      .set({ isRedeemed: true, redeemedAt: new Date() })
-      .where(eq(schema.muteMagicLinks.token, token));
+      if (shouldUnmute) {
+        await tx
+          .update(schema.contacts)
+          .set({
+            isMuted: false,
+            category: 'commercial_contact',
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.contacts.id, contactId));
+      } else {
+        await tx
+          .update(schema.contacts)
+          .set({
+            isMuted: true,
+            category: 'explicit_excluded',
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.contacts.id, contactId));
+      }
 
-    return {
-      success: true,
-      targetPhone: row.targetPhone,
-      businessId: row.businessId,
-      actionTaken: shouldUnmute ? 'unmuted' : 'muted',
-    };
+      await tx
+        .update(schema.muteMagicLinks)
+        .set({ isRedeemed: true, redeemedAt: new Date() })
+        .where(eq(schema.muteMagicLinks.token, token));
+
+      return {
+        success: true,
+        targetPhone: row.targetPhone,
+        businessId: row.businessId,
+        actionTaken: shouldUnmute ? 'unmuted' : 'muted',
+      };
+    });
   }
 
   async recordDecision(
