@@ -129,7 +129,8 @@ export async function processMessageEvent(
 
       // Outcome 2: NEUTRAL_SMS (Uncertain relationship / single first-name contact)
       if (decision.action === 'neutral_sms') {
-        const neutralText = "Hey mate, missed your call, what's up?";
+        const tradieName = tenant.ownerFirstName || businessName;
+        const neutralText = `G'day, you've reached ${tradieName}'s business. He's tied up at the moment, but I can pass on a message or help with a work enquiry. What can I help with?`;
         await twilio.sendSms({ from: dialedNumber, to: callerNumber, body: neutralText });
 
         session.history.push({
@@ -200,6 +201,39 @@ export async function processMessageEvent(
     // ── 1. PRE-FLIGHT GATEWAY: Check active IntentSession in Neon ───────────
     if (eligibilityEngine) {
       const intentSession = await eligibilityEngine.repo.getIntentSession(businessId, callerNumber);
+
+      // Defensive Guard: If IntentSession is already resolved as personal, keep AI receptionist completely silent
+      // and forward personal message directly to tradie owner so communication isn't dropped.
+      if (intentSession && intentSession.status === 'resolved_personal') {
+        logger.info({ callerNumber }, 'IntentSession already resolved_personal — enforcing bot silence and forwarding to owner');
+        const contact = await eligibilityEngine.repo.getContact(businessId, callerNumber);
+        const contactName = contact?.displayName || callerNumber;
+        await twilio.sendSms({
+          from: dialedNumber,
+          to: ownerPhone,
+          body: `[Personal Chat from ${contactName}]: "${body}"`,
+        });
+
+        session.status = 'TERMINATED';
+        session.history.push({
+          role: 'customer',
+          content: body,
+          channel: 'twilio_sms',
+          timestamp: new Date().toISOString(),
+        });
+        await sessionStore.saveSession(session);
+
+        return {
+          statusCode: 200,
+          data: {
+            status: 'TERMINATED',
+            silenced: true,
+            forwardedToOwner: true,
+            reason: 'resolved_personal',
+          },
+        };
+      }
+
       if (intentSession && intentSession.status === 'awaiting_intent') {
         logger.info({ callerNumber }, 'Active awaiting_intent session found in Neon — running Bouncer Classifier');
 
@@ -209,9 +243,7 @@ export async function processMessageEvent(
 
         if (classification.classification === 'PERSONAL') {
           // Rule BouncerClassifiesPersonalReply:
-          // 1. Auto-mute contact in Neon
-          await eligibilityEngine.repo.muteContact(businessId, callerNumber);
-          // 2. Mark intent session as resolved_personal
+          // 1. Mark intent session as resolved_personal (session-level silence)
           await eligibilityEngine.repo.saveIntentSession({
             ...intentSession,
             status: 'resolved_personal',
@@ -219,7 +251,7 @@ export async function processMessageEvent(
             classificationResult: 'personal',
           });
 
-          // 3. Generate 1-Tap Magic Mute confirmation token
+          // 2. Generate 1-Tap Magic Mute confirmation token (allows tradie to permanently mute contact forever)
           let muteUrl: string | undefined;
           try {
             const token = Math.random().toString(36).substring(2, 10);
@@ -229,15 +261,17 @@ export async function processMessageEvent(
             logger.warn({ err: e.message }, 'Failed to create magic mute link on personal reply');
           }
 
-          // 4. Forward text directly to Tradie mobile with unmute link ($0 ongoing bot cost)
+          // 3. Forward text directly to Tradie mobile with permanent mute option
           const contact = await eligibilityEngine.repo.getContact(businessId, callerNumber);
           const contactName = contact?.displayName || callerNumber;
           await twilio.sendSms({
             from: dialedNumber,
             to: ownerPhone,
-            body: `[Personal Chat from ${contactName}]: "${body}"\n\n🛡️ Contact auto-muted. Bot silenced.\nMistake? Tap to unmute: ${muteUrl || 'N/A'}`,
+            body: `[Personal Chat from ${contactName}]: "${body}"\n\n🛡️ Bot silenced for this chat.\nNever want bot to text them? Tap to Mute Forever: ${muteUrl || 'N/A'}`,
           });
 
+          // Explicitly enter terminal TERMINATED state to silence future bot interactions
+          session.status = 'TERMINATED';
           session.history.push({
             role: 'customer',
             content: body,
@@ -249,13 +283,14 @@ export async function processMessageEvent(
           return {
             statusCode: 200,
             data: {
-              status: 'resolved_personal',
-              autoMuted: true,
+              status: 'TERMINATED',
+              intentStatus: 'resolved_personal',
+              autoMuted: false,
               forwardedToOwner: true,
               silenced: true,
               muteUrl,
               contactName,
-              message: 'Personal chat detected. Contact auto-muted; receptionist silenced.',
+              message: 'Personal chat detected. Active session silenced; permanent mute link sent to owner.',
             },
           };
         } else {

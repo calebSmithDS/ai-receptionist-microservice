@@ -127,7 +127,7 @@ rule DispatchNeutralSmsForUncertainContact {
   ensures:
     EligibilityDecision.action = neutral_sms
     EligibilityDecision.reason = "known_contact_uncertain"
-    SMS.sent(to: caller_phone, body: "Hey mate, missed your call, what's up?")
+    SMS.sent(to: caller_phone, body: "G'day, you've reached [Tradie]'s business. He's tied up at the moment, but I can pass on a message or help with a work enquiry. What can I help with?")
     IntentSession.status = awaiting_intent
     IntentSession.caller_phone = caller_phone
     IntentSession.neutral_sms_sent_at = now
@@ -175,15 +175,15 @@ rule BouncerClassifiesPersonalReply {
     IntentSession.status = resolved_personal
     IntentSession.incoming_reply_text = full_text
     IntentSession.classification_result = personal
-    contact.is_muted = true
-    contact.category = explicit_excluded
+    -- Silence is scoped to current conversation session; contact is not permanently muted unless tradie taps link
+    CustomerSession.status = terminated
+    Bot.maintain_silence = true  -- $0 ongoing bot cost for active session
     MuteMagicLink.token = generate_token()
     SMS.forward_to_tradie(
       from: caller_phone,
       body: full_text,
-      footer: "Personal chat detected. Contact auto-muted. Magic link: " + MuteMagicLink.url
+      footer: "Personal chat detected. Bot silenced for this chat. Never want bot to text them? Tap to Mute Forever: " + MuteMagicLink.url
     )
-    Bot.maintain_silence = true  -- $0 ongoing bot cost
 }
 
 rule BouncerClassifiesTradeServiceReply {
