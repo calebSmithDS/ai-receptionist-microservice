@@ -32,7 +32,7 @@ export function registerProcessMessageWorkerRoute(
         bufferManager,
         eligibilityEngine,
         bouncerClassifier,
-        logger: req.log,
+        logger: req.telemetry || req.log,
       });
       return reply.status(result.statusCode).send(result.data);
     }

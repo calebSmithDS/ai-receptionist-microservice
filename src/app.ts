@@ -19,6 +19,7 @@ import { GeminiBouncerClassifier } from './core/eligibility/gemini-bouncer.js';
 import { getDb } from './core/db/index.js';
 import { Redis } from '@upstash/redis';
 import { env } from './config/env.js';
+import telemetryPlugin from './plugins/telemetry.js';
 
 /**
  * Fastify Application Factory
@@ -53,6 +54,9 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
 
   // Fastify plugin to parse application/x-www-form-urlencoded payloads from Twilio webhooks
   await app.register(formbody);
+
+  // Register Telemetry & Correlation Hook (Injects request.telemetry & masks PII)
+  await app.register(telemetryPlugin);
 
   // Multi-tenant configuration: Sanity CMS wrapped with Upstash Redis 1-hour caching
   const redis = env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN
@@ -137,5 +141,3 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
 }
 
 export default buildApp;
-
-

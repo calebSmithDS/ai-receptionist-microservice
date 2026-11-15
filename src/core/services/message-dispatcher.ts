@@ -1,3 +1,37 @@
+
+async function recordSessionLedger(params: {
+  sessionId: string;
+  businessId: string;
+  callerPhone: string;
+  terminalStatus: 'COMPLETED' | 'ESCALATED' | 'ABANDONED' | 'TERMINATED';
+  escalationReason?: string;
+  turnCount: number;
+  stallCount: number;
+  extractedSuburb?: string;
+  servicem8JobUuid?: string;
+  startedAt: string;
+}) {
+  try {
+    const db = getDb();
+    if (!db) return;
+    await db.insert(conversationLedgers).values({
+      sessionId: params.sessionId,
+      businessId: params.businessId,
+      callerPhone: params.callerPhone,
+      terminalStatus: params.terminalStatus,
+      escalationReason: params.escalationReason,
+      turnCount: params.turnCount,
+      stallCount: params.stallCount,
+      extractedSuburb: params.extractedSuburb,
+      servicem8JobUuid: params.servicem8JobUuid,
+      startedAt: new Date(params.startedAt || Date.now()),
+      resolvedAt: new Date(),
+    }).onConflictDoNothing();
+  } catch (err) {
+    console.warn('[TelemetryLedger] Failed to record conversation ledger:', err);
+  }
+}
+
 import { SessionStore } from '../session-store.js';
 import { transition } from '../state-machine.js';
 import { GeminiQualificationEvaluator } from '../gemini-evaluator.js';
@@ -7,10 +41,14 @@ import { ITenantProvider } from '../types/tenant.js';
 import { MessageBufferManager } from '../message-buffer.js';
 import { EligibilityEngine } from '../eligibility/eligibility-engine.js';
 import { GeminiBouncerClassifier } from '../eligibility/gemini-bouncer.js';
-import { CollectedJobDetails } from '../../contracts/session-state.contract.js';
+import { CollectedJobDetails, buildSessionKey } from '../../contracts/session-state.contract.js';
+import { getDb } from '../db/index.js';
+import { conversationLedgers } from '../db/schema.js';
 import { env } from '../../config/env.js';
+import { maskPhoneNumber } from '../logger.js';
 
 export interface ProcessMessagePayload {
+  traceId?: string;
   eventType: 'MISSED_CALL' | 'INBOUND_SMS';
   channel: 'twilio_voice' | 'twilio_sms';
   callerNumber: string;
@@ -49,6 +87,7 @@ export async function processMessageEvent(
   const { sessionStore, gemini, twilio, tenantProvider, servicem8, bufferManager, eligibilityEngine, bouncerClassifier } = deps;
   const logger = deps.logger || console;
   let { callerNumber, dialedNumber, eventType, body = '', mediaUrls = [], debounceVersion } = payload;
+  const maskedPhone = maskPhoneNumber(callerNumber || '');
 
   if (!callerNumber || !dialedNumber) {
     logger.warn({ payload }, 'Worker received payload with missing phone numbers');
@@ -95,7 +134,7 @@ export async function processMessageEvent(
     );
   }
 
-  logger.info({ eventType, businessId, businessName, callerNumber }, 'Worker processing message');
+  logger.info({ eventType, businessId, businessName, maskedPhone }, 'Worker processing message');
 
   // 2. Hydrate Session State from Redis
   const { session } = await sessionStore.getOrCreateSession({
@@ -106,11 +145,11 @@ export async function processMessageEvent(
 
   // Global Guards
   if (session.status === 'TERMINATED') {
-    logger.info({ callerNumber }, 'Session is TERMINATED (spam). Dropping webhook at zero cost.');
+    logger.info({ maskedPhone}, 'Session is TERMINATED (spam). Dropping webhook at zero cost.');
     return { statusCode: 200, data: { status: 'TERMINATED', dropped: true } };
   }
   if (session.status === 'ABANDONED') {
-    logger.info({ callerNumber }, 'Session is ABANDONED (anti-loop). Dropping webhook silently.');
+    logger.info({ maskedPhone}, 'Session is ABANDONED (anti-loop). Dropping webhook silently.');
     return { statusCode: 200, data: { status: 'ABANDONED', dropped: true } };
   }
 
@@ -119,11 +158,11 @@ export async function processMessageEvent(
     // 1. Run deterministic eligibility check before touching FSM or sending SMS
     if (eligibilityEngine) {
       const decision = await eligibilityEngine.evaluateMissedCall(businessId, callerNumber);
-      logger.info({ callerNumber, action: decision.action, reason: decision.reason }, 'Eligibility engine evaluated missed call');
+      logger.info({ maskedPhone, action: decision.action, reason: decision.reason }, 'Eligibility engine evaluated missed call');
 
       // Outcome 1: SUPPRESS ($0 gate)
       if (decision.action === 'suppress') {
-        logger.info({ callerNumber, reason: decision.reason }, 'Missed call text-back suppressed by eligibility engine');
+        logger.info({ maskedPhone, reason: decision.reason }, 'Missed call text-back suppressed by eligibility engine');
         return { statusCode: 200, data: { status: 'suppressed', reason: decision.reason, eligibility: decision } };
       }
 
@@ -151,7 +190,7 @@ export async function processMessageEvent(
           logger.warn({ err: e.message }, 'Failed to create magic mute link on neutral SMS');
         }
 
-        logger.info({ callerNumber, muteUrl }, 'Dispatched neutral SMS to uncertain contact');
+        logger.info({ maskedPhone, muteUrl }, 'Dispatched neutral SMS to uncertain contact');
         return {
           statusCode: 200,
           data: {
@@ -205,7 +244,7 @@ export async function processMessageEvent(
       // Defensive Guard: If IntentSession is already resolved as personal, keep AI receptionist completely silent
       // and forward personal message directly to tradie owner so communication isn't dropped.
       if (intentSession && intentSession.status === 'resolved_personal') {
-        logger.info({ callerNumber }, 'IntentSession already resolved_personal — enforcing bot silence and forwarding to owner');
+        logger.info({ maskedPhone}, 'IntentSession already resolved_personal — enforcing bot silence and forwarding to owner');
         const contact = await eligibilityEngine.repo.getContact(businessId, callerNumber);
         const contactName = contact?.displayName || callerNumber;
         await twilio.sendSms({
@@ -235,11 +274,11 @@ export async function processMessageEvent(
       }
 
       if (intentSession && intentSession.status === 'awaiting_intent') {
-        logger.info({ callerNumber }, 'Active awaiting_intent session found in Neon — running Bouncer Classifier');
+        logger.info({ maskedPhone}, 'Active awaiting_intent session found in Neon — running Bouncer Classifier');
 
         const bouncer = bouncerClassifier || new GeminiBouncerClassifier();
         const classification = await bouncer.classify(body, tenant.tradeType || 'tradie');
-        logger.info({ callerNumber, classification: classification.classification, reasoning: classification.reasoning }, 'Bouncer classification complete');
+        logger.info({ maskedPhone, classification: classification.classification, reasoning: classification.reasoning }, 'Bouncer classification complete');
 
         if (classification.classification === 'PERSONAL') {
           // Rule BouncerClassifiesPersonalReply:
@@ -265,7 +304,7 @@ export async function processMessageEvent(
           // Distributed Boundary Guard: If Twilio delivery fails, fail fast so QStash retries cleanly
           // without leaving partial, silent-drop DB state in Postgres.
           if (!smsResult.success) {
-            logger.error({ callerNumber, ownerPhone }, 'Twilio SMS forward to owner failed for personal chat — aborting for retry');
+            logger.error({ maskedPhone, ownerPhone }, 'Twilio SMS forward to owner failed for personal chat — aborting for retry');
             return {
               statusCode: 500,
               data: {
@@ -315,7 +354,7 @@ export async function processMessageEvent(
             incomingReplyText: body,
             classificationResult: 'service',
           });
-          logger.info({ callerNumber }, 'Bouncer classified as SERVICE — handing off to Lead Receptionist FSM');
+          logger.info({ maskedPhone}, 'Bouncer classified as SERVICE — handing off to Lead Receptionist FSM');
         }
       }
     }
@@ -347,6 +386,20 @@ export async function processMessageEvent(
         body: `[Follow-up from ${callerNumber}]: "${body}"`,
       });
       await sessionStore.saveSession(currentSession);
+    if (['COMPLETED', 'ESCALATED', 'TERMINATED', 'ABANDONED'].includes(currentSession.status)) {
+      await recordSessionLedger({
+        sessionId: buildSessionKey(businessId, callerNumber),
+        businessId,
+        callerPhone: callerNumber,
+        terminalStatus: currentSession.status as any,
+        turnCount: currentSession.metadata.turnCount,
+        stallCount: currentSession.metadata.stallCount,
+        extractedSuburb: currentSession.collectedData.suburb || undefined,
+        servicem8JobUuid: currentSession.crmSync?.externalJobId,
+        startedAt: currentSession.createdAt,
+      });
+      logger.info({ terminalStatus: currentSession.status, servicem8JobUuid: currentSession.crmSync?.externalJobId }, 'Recorded session outcome in PostgreSQL conversation_ledgers');
+    }
       return { statusCode: 200, data: { status: session.status, forwarded: true } };
     }
 
@@ -362,7 +415,7 @@ export async function processMessageEvent(
     if (evalOutput.intent === 'solicitation' || evalOutput.intent === 'spam') {
       const spamResult = transition(currentSession, { type: 'SPAM_DETECTED' });
       await sessionStore.saveSession(spamResult.nextState);
-      logger.info({ callerNumber, intent: evalOutput.intent }, 'Spam detected — session TERMINATED');
+      logger.info({ maskedPhone, intent: evalOutput.intent }, 'Spam detected — session TERMINATED');
       return { statusCode: 200, data: { status: 'TERMINATED', intent: evalOutput.intent } };
     }
 

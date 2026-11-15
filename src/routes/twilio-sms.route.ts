@@ -44,6 +44,7 @@ export function registerTwilioSmsRoutes(
   app.post(
     '/api/webhooks/twilio/sms',
     async (req: FastifyRequest<{ Body: TwilioSmsWebhookBody }>, reply: FastifyReply) => {
+      const reqLog = req.telemetry || req.log;
       const messageSid = req.body?.MessageSid || req.body?.SmsSid;
       const callerNumber = req.body?.From;
       const dialedNumber = req.body?.To;
@@ -51,7 +52,7 @@ export function registerTwilioSmsRoutes(
 
       // Validate required SMS fields
       if (!messageSid || !callerNumber || !dialedNumber) {
-        req.log.warn({ body: req.body }, 'Twilio SMS webhook received missing required fields');
+        reqLog.warn({ body: req.body }, 'Twilio SMS webhook received missing required fields');
         return reply.status(200).type('text/xml').send(EMPTY_TWIML_RESPONSE);
       }
 
@@ -76,7 +77,7 @@ export function registerTwilioSmsRoutes(
           receivedAt: new Date().toISOString(),
         });
         debounceVersion = result.version;
-        req.log.info(
+        reqLog.info(
           { callerNumber, version: debounceVersion, totalBuffered: result.totalBuffered },
           'Customer message ingested into debounce buffer'
         );
@@ -102,13 +103,13 @@ export function registerTwilioSmsRoutes(
             body: queueEvent,
             delay: '10s', // Wait 10 seconds for customer to finish typing subsequent texts
           });
-          req.log.info({ messageSid, debounceVersion, delay: '10s' }, 'Scheduled 10s debounced SMS evaluation in QStash');
+          reqLog.info({ messageSid, debounceVersion, delay: '10s' }, 'Scheduled 10s debounced SMS evaluation in QStash');
         } catch (err: any) {
           const errMsg = err?.message || JSON.stringify(err);
           if (errMsg.includes('loopback address') || destinationWorkerUrl.includes('localhost')) {
-            req.log.warn({ destinationWorkerUrl }, '[QStash Local Dev] Simulated successful debounce publish');
+            reqLog.warn({ destinationWorkerUrl }, '[QStash Local Dev] Simulated successful debounce publish');
           } else {
-            req.log.error({ err, messageSid }, 'Failed to publish SMS event to QStash');
+            reqLog.error({ err, messageSid }, 'Failed to publish SMS event to QStash');
             return reply.status(500).send({ error: 'Failed to queue SMS event' });
           }
         }

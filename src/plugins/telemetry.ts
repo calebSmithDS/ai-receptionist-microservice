@@ -33,16 +33,19 @@ interface TwilioWebhookBody {
   From?: string;
   Body?: string;
   MessageSid?: string;
+  CallSid?: string;
   [key: string]: unknown;
 }
 
 /**
- * Asynchronous QStash Webhook Payload Shape
+ * Asynchronous Worker / QStash Webhook Payload Shape
  */
-interface QStashWebhookBody {
+interface WorkerWebhookBody {
   traceId?: string;
   businessId?: string;
+  callerNumber?: string;
   callerPhone?: string;
+  dialedNumber?: string;
   sessionId?: string;
   [key: string]: unknown;
 }
@@ -52,39 +55,25 @@ const tenantResolver = new TenantResolverService();
 /**
  * Telemetry & Tenant Context Fastify Plugin
  *
- * Wrapped in `fastify-plugin` (fp) so Fastify does NOT encapsulate decorators and hooks
- * into a child scope, making them available across all application routes.
+ * Intercepts:
+ * 1. Twilio Ingress (/api/webhooks/twilio/*)
+ * 2. Async QStash / Process Message Worker (/api/workers/process-message)
  */
 const telemetryPlugin: FastifyPluginAsync = async (fastify) => {
-  /**
-   * ARCHITECTURAL WHY: preHandler Hook vs onRequest Hook
-   * - `onRequest` executes before the HTTP body is parsed.
-   * - Twilio sends inbound SMS as `application/x-www-form-urlencoded`.
-   * - We need the parsed `request.body.To` and `request.body.From`, so we run this in `preHandler`
-   *   (after `@fastify/formbody` has parsed the payload into an object).
-   */
   fastify.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
     const url = request.url;
 
-    // 1. ROUTE GUARD: Non-webhook routes (e.g. /health, /metrics) bypass heavy tenant lookups
-    if (!url.startsWith('/webhooks/')) {
-      const defaultTraceId = (request.headers['x-request-id'] as string) || crypto.randomUUID();
-      request.telemetryContext = { businessId: 'system', traceId: defaultTraceId };
-      request.telemetry = createScopedLogger(request.telemetryContext);
-      return;
-    }
-
     // -------------------------------------------------------------------------
-    // SCENARIO A: Inbound Twilio Webhook (/webhooks/twilio)
+    // SCENARIO A: Inbound Twilio Webhooks (/api/webhooks/twilio/sms or voice)
     // -------------------------------------------------------------------------
-    if (url.startsWith('/webhooks/twilio')) {
+    if (url.includes('/webhooks/twilio/')) {
       const body = (request.body as TwilioWebhookBody) || {};
       const dialedNumber = body.To;
       const rawCallerPhone = body.From;
 
       // Always generate a fresh distributed traceId at the very first point of ingress
       const traceId = crypto.randomUUID();
-      const burstId = body.MessageSid || crypto.randomUUID();
+      const burstId = body.MessageSid || body.CallSid || crypto.randomUUID();
 
       if (!dialedNumber || !rawCallerPhone) {
         request.telemetryContext = {
@@ -94,7 +83,7 @@ const telemetryPlugin: FastifyPluginAsync = async (fastify) => {
         };
         request.telemetry = createScopedLogger(request.telemetryContext);
         request.telemetry.warn('Malformed Twilio payload missing To or From');
-        return reply.status(400).send({ error: 'Missing To or From in Twilio payload' });
+        return;
       }
 
       // Resolve Tenant
@@ -108,8 +97,8 @@ const telemetryPlugin: FastifyPluginAsync = async (fastify) => {
           burstId,
         };
         request.telemetry = createScopedLogger(request.telemetryContext);
-        request.telemetry.warn({ dialedNumber }, 'Inbound SMS to unassigned Twilio number');
-        return reply.status(404).send({ error: 'TenantNotFound' });
+        request.telemetry.warn({ dialedNumber }, 'Inbound webhook to unassigned Twilio number');
+        return;
       }
 
       // Populate context on request
@@ -123,29 +112,18 @@ const telemetryPlugin: FastifyPluginAsync = async (fastify) => {
         burstId,
       };
       request.telemetry = createScopedLogger(request.telemetryContext);
-
-      request.telemetry.info(
-        { messageSid: body.MessageSid, companyName: tenant.companyName },
-        'Inbound Twilio SMS received and correlated'
-      );
       return;
     }
 
     // -------------------------------------------------------------------------
-    // SCENARIO B: Asynchronous QStash Debounced Worker (/webhooks/qstash)
+    // SCENARIO B: Asynchronous Worker (/api/workers/process-message)
     // -------------------------------------------------------------------------
-    if (url.startsWith('/webhooks/qstash')) {
-      const body = (request.body as QStashWebhookBody) || {};
+    if (url.includes('/api/workers/process-message')) {
+      const body = (request.body as WorkerWebhookBody) || {};
 
-      /**
-       * ARCHITECTURAL WHY: Trace Continuity Across Async Boundaries
-       * Instead of creating a brand-new traceId, we re-hydrate the traceId that the inbound
-       * Twilio handler placed into the QStash message payload.
-       * This unifies logs across the entire asynchronous lifecycle.
-       */
-      const traceId = body.traceId || crypto.randomUUID();
+      const traceId = body.traceId || (request.headers['x-request-id'] as string) || crypto.randomUUID();
+      const rawCallerPhone = body.callerNumber || body.callerPhone;
       const businessId = body.businessId || 'unknown';
-      const rawCallerPhone = body.callerPhone;
 
       request.telemetryContext = {
         businessId,
@@ -156,10 +134,15 @@ const telemetryPlugin: FastifyPluginAsync = async (fastify) => {
         sessionId: body.sessionId,
       };
       request.telemetry = createScopedLogger(request.telemetryContext);
-
-      request.telemetry.info('QStash debounced worker execution resumed with preserved traceId');
       return;
     }
+
+    // -------------------------------------------------------------------------
+    // SCENARIO C: Default / Non-webhook routes (/health, etc.)
+    // -------------------------------------------------------------------------
+    const defaultTraceId = (request.headers['x-request-id'] as string) || crypto.randomUUID();
+    request.telemetryContext = { businessId: 'system', traceId: defaultTraceId };
+    request.telemetry = createScopedLogger(request.telemetryContext);
   });
 };
 
@@ -167,4 +150,3 @@ export default fp(telemetryPlugin, {
   name: 'telemetry-plugin',
   fastify: '5.x',
 });
-

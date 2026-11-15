@@ -50,13 +50,14 @@ export function registerTwilioVoiceRoutes(app: FastifyInstance) {
   app.post(
     '/api/webhooks/twilio/voice',
     async (req: FastifyRequest<{ Body: TwilioVoiceWebhookBody }>, reply: FastifyReply) => {
+      const reqLog = req.telemetry || req.log;
       const callSid = req.body?.CallSid;
       const callerNumber = req.body?.From;
       const dialedNumber = req.body?.To;
 
       // Validate required Twilio voice fields
       if (!callSid || !callerNumber || !dialedNumber) {
-        req.log.warn({ body: req.body }, 'Twilio voice webhook received with missing required fields');
+        reqLog.warn({ body: req.body }, 'Twilio voice webhook received with missing required fields');
         // Return 200 with reject so Twilio doesn't retry invalid payloads endlessly
         return reply
           .status(200)
@@ -64,7 +65,7 @@ export function registerTwilioVoiceRoutes(app: FastifyInstance) {
           .send(TWIML_REJECT_RESPONSE);
       }
 
-      req.log.info(
+      reqLog.info(
         { callSid, callerNumber, dialedNumber },
         'Inbound voice call intercepted. Preparing QStash delay job.'
       );
@@ -92,23 +93,23 @@ export function registerTwilioVoiceRoutes(app: FastifyInstance) {
             delay: 30, // 30 seconds delay per architecture specification
           });
 
-          req.log.info(
+          reqLog.info(
             { callSid, destinationWorkerUrl, delaySeconds: 30 },
             'Missed call job published to QStash successfully'
           );
         } catch (err: any) {
           const errMsg = err?.message || JSON.stringify(err);
           if (errMsg.includes('loopback address') || destinationWorkerUrl.includes('localhost')) {
-            req.log.warn({ destinationWorkerUrl }, '[QStash Local Dev] QStash cloud cannot hit localhost; simulated successful publish');
+            reqLog.warn({ destinationWorkerUrl }, '[QStash Local Dev] QStash cloud cannot hit localhost; simulated successful publish');
           } else {
-            req.log.error({ err, callSid }, 'Failed to publish missed call job to QStash');
+            reqLog.error({ err, callSid }, 'Failed to publish missed call job to QStash');
             // If queuing fails, return HTTP 500 so Twilio fallback URL or carrier retries can kick in
             return reply.status(500).send({ error: 'Failed to queue missed call task' });
           }
         }
       } else {
         // Fallback simulation for local dev
-        req.log.info(
+        reqLog.info(
           { queueEvent, destinationWorkerUrl, delay: '30s', note: 'QSTASH_TOKEN not set; simulated publish' },
           '[Local Dev] Simulated QStash publish for missed call'
         );
