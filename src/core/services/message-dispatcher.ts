@@ -85,9 +85,13 @@ export async function processMessageEvent(
   }
 ): Promise<{ statusCode: number; data: any }> {
   const { sessionStore, gemini, twilio, tenantProvider, servicem8, bufferManager, eligibilityEngine, bouncerClassifier } = deps;
-  const logger = deps.logger || console;
-  let { callerNumber, dialedNumber, eventType, body = '', mediaUrls = [], debounceVersion } = payload;
+    let { callerNumber, dialedNumber, eventType, body = '', mediaUrls = [], debounceVersion } = payload;
   const maskedPhone = maskPhoneNumber(callerNumber || '');
+  const traceId = payload.traceId || (deps.logger?.bindings ? deps.logger.bindings()?.telemetry?.traceId : undefined);
+  const baseLogger = deps.logger || console;
+  const logger = (baseLogger && typeof baseLogger.child === 'function')
+    ? baseLogger.child({ telemetry: { businessId: payload.businessId || 'unknown', maskedPhone, traceId } })
+    : baseLogger;
 
   if (!callerNumber || !dialedNumber) {
     logger.warn({ payload }, 'Worker received payload with missing phone numbers');
@@ -134,7 +138,7 @@ export async function processMessageEvent(
     );
   }
 
-  logger.info({ eventType, businessId, businessName, maskedPhone }, 'Worker processing message');
+  logger.info({ eventType, businessId, businessName, traceId }, 'Worker processing message');
 
   // 2. Hydrate Session State from Redis
   const { session } = await sessionStore.getOrCreateSession({

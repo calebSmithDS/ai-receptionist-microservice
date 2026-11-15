@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { SessionStore } from '../core/session-store.js';
 import { GeminiQualificationEvaluator } from '../core/gemini-evaluator.js';
@@ -51,8 +52,9 @@ export function registerDemoRoutes(
   } as unknown as TwilioSmsClient;
 
   // Direct worker function call - bypasses HTTP / light-my-request entirely!
-  async function invokeWorkerDirectly(payload: any) {
-    return processMessageEvent(payload, {
+  async function invokeWorkerDirectly(payload: any, scopedLogger?: any) {
+    const traceId = payload.traceId || crypto.randomUUID();
+    return processMessageEvent({ ...payload, traceId }, {
       sessionStore,
       gemini,
       twilio: demoTwilioClient,
@@ -61,7 +63,7 @@ export function registerDemoRoutes(
       bufferManager,
       eligibilityEngine,
       bouncerClassifier,
-      logger: app.log,
+      logger: scopedLogger || app.log,
     });
   }
 
@@ -156,13 +158,14 @@ export function registerDemoRoutes(
 
         // Trigger missed call via internal worker invocation
         const workerResult = await invokeWorkerDirectly({
+          traceId: req.telemetryContext?.traceId,
           eventType: 'MISSED_CALL',
           channel: 'twilio_voice',
           callerNumber: callerId,
           dialedNumber,
           businessId,
           receivedAt: new Date().toISOString(),
-        });
+        }, req.telemetry);
 
         const session = await sessionStore.getSession(businessId, callerId);
         const lastMsg = session?.history[session.history.length - 1];
@@ -178,6 +181,7 @@ export function registerDemoRoutes(
 
       // Customer sends an SMS message
       const result = await invokeWorkerDirectly({
+        traceId: req.telemetryContext?.traceId,
         eventType: 'INBOUND_SMS',
         channel: 'twilio_sms',
         callerNumber: callerId,
@@ -186,7 +190,7 @@ export function registerDemoRoutes(
         body: message,
         receivedAt: new Date().toISOString(),
         debounceVersion,
-      });
+      }, req.telemetry);
 
       if (result?.data?.status === 'skipped') {
         return reply.send({ success: true, skipped: true });
