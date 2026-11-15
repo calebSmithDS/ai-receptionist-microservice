@@ -580,6 +580,23 @@ export async function processMessageEvent(
     }
 
     await sessionStore.saveSession(currentSession);
+    if (['COMPLETED', 'ESCALATED', 'TERMINATED', 'ABANDONED'].includes(currentSession.status)) {
+      await recordSessionLedger({
+        sessionId: buildSessionKey(businessId, callerNumber),
+        businessId,
+        callerPhone: callerNumber,
+        terminalStatus: currentSession.status as any,
+        turnCount: currentSession.metadata.turnCount,
+        stallCount: currentSession.metadata.stallCount,
+        extractedSuburb: currentSession.collectedData.suburb || undefined,
+        servicem8JobUuid: currentSession.crmSync?.externalJobId,
+        startedAt: currentSession.createdAt,
+      });
+      logger.info(
+        { terminalStatus: currentSession.status, servicem8JobUuid: currentSession.crmSync?.externalJobId },
+        'Recorded session outcome in PostgreSQL conversation_ledgers'
+      );
+    }
     return {
       statusCode: 200,
       data: {
