@@ -129,3 +129,7 @@ export const eligibilityDecisions = pgTable(
   ]
 );
 
+
+
+// Re-export conversation ledgers for analytics & ROI queries
+export * from '../../db/schema.js';
